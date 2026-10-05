@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Home network panel for the GTPL OVT OP2200H router.
+"""fun-router: a fun, explained web console for home routers.
 
-Serves index.html and a small JSON API. The API reads, and submits, the same
-pages and forms the router's own web console at 192.168.1.1 uses. The router
-ties its login to this computer's IP address, so the panel works while this
-computer is logged in to the console (or after you log in from the panel).
+Serves the page in web/ and a small JSON API. A driver in routers/ reads, and submits,
+the same pages and forms the router's own web console uses; this file doesn't know
+which router it is talking to.
 
 Python 3 standard library only:
 
-    python3 server.py                    # http://127.0.0.1:8787
+    py server.py                         # Windows
+    python3 server.py                    # macOS / Linux
     python3 server.py --lan --pin 4821   # also reachable from phones on the Wi-Fi
 """
 
 import argparse
-import base64
 import hmac
-import http.client
 import http.server
+import ipaddress
 import json
+import mimetypes
 import os
 import random
 import re
@@ -25,313 +25,39 @@ import socket
 import struct
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
-from html import unescape
 
-ROUTER_IP = '192.168.1.1'
-ROUTER = 'http://' + ROUTER_IP
-ACCESS_POINT_IP = '192.168.1.3'  # TP-Link TL-WR850N in access-point mode, first floor
-WAN_IFACE = '65536'              # ppp0_nas0_0, the only WAN in net_qos_traffictl_edit.asp
+from routers import NotLoggedIn, RouterError, make_driver
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+WEB = os.path.join(HERE, 'web')
+NICKNAMES_FILE = os.path.join(HERE, 'nicknames.json')
+CONFIG_FILE = os.path.join(HERE, 'config.json')
+DEFAULT_CONFIG = {
+    'router': '192.168.1.1',
+    'driver': 'realtek-boa',
+    'protect': {},         # {ip: reason} for devices the panel must never block or limit
+    'interfaceNames': {},  # {"LAN1": "Upstairs access point"} to label wired ports
+}
 MIN_LIMIT_KBPS = 256
 MAX_LIMIT_KBPS = 1000000
-HERE = os.path.dirname(os.path.abspath(__file__))
-NICKNAMES_FILE = os.path.join(HERE, 'nicknames.json')
-
-# The only router forms this panel can submit, and the only submit buttons it
-# may press on them. Firmware, backup/restore, reboot, WAN/GPON/TR-069,
-# passwords, Wi-Fi settings, the MAC filter's default action and its
-# "Delete All" button are deliberately unreachable.
-ALLOWED_FORMS = {
-    '/boaform/admin/formLogin': {'save'},
-    '/boaform/admin/formFilter': {'addFilterMac', 'deleteSelFilterMac'},
-    '/boaform/admin/formQosTraffictlEdit': set(),
-    '/boaform/admin/formQosTraffictl': set(),
-}
-BUTTON_FIELDS = {'save', 'addFilterMac', 'deleteSelFilterMac', 'setMacDft', 'deleteAllFilterMac'}
-FORBIDDEN_FIELDS = {'setMacDft', 'deleteAllFilterMac', 'outAct', 'inAct'}
+STATIC_TYPES = {'.html', '.css', '.js', '.svg', '.png', '.ico', '.woff2'}
+CGNAT = ipaddress.ip_network('100.64.0.0/10')
 
 
-class NotLoggedIn(Exception):
-    pass
-
-
-class RouterError(Exception):
-    pass
-
-
-# --- Form encoding, as done by postTableEncrypt() in the router's common.js ---
-
-def _js_encode(value):
-    """encodeURIComponent() plus the console's extra escapes for ! ' ( ) ~ and space."""
-    return urllib.parse.quote_plus(str(value), safe='*').replace('~', '%7E')
-
-
-def _int32(n):
-    n &= 0xFFFFFFFF
-    return n - 0x100000000 if n & 0x80000000 else n
-
-
-def _security_flag(body):
-    """The 16-bit checksum the router expects in the postSecurityFlag field."""
-    total, i, n = 0, 0, len(body)
-    while i < n:
-        if i + 4 > n:
-            for k, shift in ((0, 24), (1, 16), (2, 8)):
-                if i + k < n:
-                    total += ord(body[i + k]) << shift
-            break
-        total += (ord(body[i]) << 24) + (ord(body[i + 1]) << 16) + (ord(body[i + 2]) << 8) + ord(body[i + 3])
-        i += 4
-    c = _int32(total)
-    c = (c & 0xFFFF) + (c >> 16)
-    c &= 0xFFFF
-    return (~c) & 0xFFFF
-
-
-def encode_form(fields):
-    body = ''.join('%s=%s&' % (name.replace('[', '%5B').replace(']', '%5D'), _js_encode(value))
-                   for name, value in fields)
-    return body + 'postSecurityFlag=%d' % _security_flag(body)
-
-
-def _check_allowed(action, fields):
-    if action not in ALLOWED_FORMS:
-        raise RouterError('Blocked: %s is not on the allow-list' % action)
-    names = {name for name, _ in fields}
-    if names & FORBIDDEN_FIELDS:
-        raise RouterError('Blocked: forbidden field sent to %s' % action)
-    buttons = names & BUTTON_FIELDS
-    if buttons - ALLOWED_FORMS[action] or (ALLOWED_FORMS[action] and len(buttons) != 1):
-        raise RouterError('Blocked: unexpected button on %s' % action)
-    if action == '/boaform/admin/formQosTraffictl':
-        if not dict(fields).get('lst', '').startswith('applysetting#id='):
-            raise RouterError('Blocked: unexpected Traffic Shaping request')
-
-
-# --- Router client ---
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
-class Router:
-    def __init__(self):
-        self.lock = threading.RLock()  # the router's web server handles one request at a time
-        self.opener = urllib.request.build_opener(_NoRedirect)
-        self.creds = None  # (username, password), in memory only, set from the panel's login form
-
-    def _request(self, path, data=None, referer='/'):
-        req = urllib.request.Request(ROUTER + path, data=data)
-        req.add_header('Referer', ROUTER + referer)
-        if data is not None:
-            req.add_header('Content-Type', 'application/x-www-form-urlencoded')
-            req.add_header('Origin', ROUTER)
-        try:
-            with self.opener.open(req, timeout=8) as resp:
-                return resp.status, '', resp.read().decode('utf-8', 'replace')
-        except urllib.error.HTTPError as e:
-            if e.code in (301, 302, 303, 307):
-                return e.code, e.headers.get('Location', ''), ''
-            raise RouterError('Router answered HTTP %d for %s' % (e.code, path))
-        except http.client.BadStatusLine as e:
-            # When logged out, the router sends a bare "You have not logined" page with no headers.
-            return 0, '', str(e)
-        except (urllib.error.URLError, http.client.HTTPException, socket.timeout, ConnectionError) as e:
-            raise RouterError('Cannot reach the router at %s (%s)' % (ROUTER_IP, getattr(e, 'reason', e)))
-
-    @staticmethod
-    def _is_login(location, body):
-        lower = body.lower()
-        return 'login.asp' in location or 'formLogin' in body or 'not logined' in lower or '<title>login</title>' in lower
-
-    def get(self, path, retry=True):
-        with self.lock:
-            _, location, body = self._request(path)
-            if self._is_login(location, body):
-                if retry and self.creds:
-                    self.login(*self.creds)
-                    return self.get(path, retry=False)
-                raise NotLoggedIn()
-            return body
-
-    def post_form(self, action, fields, referer, check_session=True):
-        _check_allowed(action, fields)
-        with self.lock:
-            _, location, text = self._request(action, encode_form(fields).encode('ascii'), referer)
-        if check_session and self._is_login(location, text):
-            raise NotLoggedIn()
-        message = re.search(r'<h4>(.*?)</h4>', text, re.S | re.I)
-        if message and re.search(r'error|fail|invalid', _text(message.group(1)), re.I):
-            raise RouterError('Router said: ' + _text(message.group(1)))
-        return text
-
-    def login(self, username, password):
-        with self.lock:
-            self.post_form('/boaform/admin/formLogin', [
-                ('challenge', ''),
-                ('username', username),
-                ('save', 'Login'),
-                ('encodePassword', base64.b64encode(password.encode('utf-8')).decode('ascii')),
-                ('submit-url', '/admin/login.asp'),
-            ], referer='/admin/login.asp', check_session=False)
-            self.creds = None
-            try:
-                self.get('/status.asp', retry=False)
-            except NotLoggedIn:
-                raise RouterError('The router did not accept that username and password')
-            self.creds = (username, password)
-
-    def stations(self, wlan_idx):
-        """Wi-Fi clients on one of the router's own radios (0 = 5 GHz, 1 = 2.4 GHz)."""
-        with self.lock:
-            self.get('/boaform/formWlanRedirect?redirect-url=/wlstatbl.asp&wlan_idx=%d' % wlan_idx)
-            return parse_stations(self.get('/wlstatbl.asp'))
-
-
-# --- Console page parsers ---
-
-_COMMENT = re.compile(r'<!--.*?-->', re.S)
-_ROW = re.compile(r'<tr[^>]*>(.*?)</tr>', re.S | re.I)
-_CELL = re.compile(r'<t[hd][^>]*>(.*?)</t[hd]>', re.S | re.I)
-_TAG = re.compile(r'<[^>]+>')
-_IP = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
-_MAC = re.compile(r'^[0-9a-f]{2}([:-]?)[0-9a-f]{2}(\1[0-9a-f]{2}){4}$', re.I)
-
-
-def _text(fragment):
-    return ' '.join(unescape(_TAG.sub(' ', fragment)).split())
-
-
-def _rows(page):
-    """(row html, [cell text, ...]) for every table row on a console page."""
-    page = _COMMENT.sub('', page)
-    return [(row, [_text(c) for c in _CELL.findall(row)]) for row in _ROW.findall(page)]
-
-
-def _mac(value):
-    value = (value or '').strip()
-    if not _MAC.match(value):
-        return None
-    digits = re.sub(r'[^0-9a-f]', '', value.lower())
-    return ':'.join(digits[i:i + 2] for i in range(0, 12, 2))
-
-
-def _int(value):
+def load_config():
+    config = dict(DEFAULT_CONFIG)
     try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None
+        with open(CONFIG_FILE, encoding='utf-8') as f:
+            config.update(json.load(f))
+    except FileNotFoundError:
+        pass
+    except ValueError as e:
+        raise SystemExit('config.json is not valid JSON: %s' % e)
+    return config
 
 
-def parse_status(page):
-    info = {}
-    for _, cells in _rows(page):
-        if len(cells) == 2:
-            info.setdefault(cells[0], cells[1])
-        elif len(cells) >= 7 and cells[0].startswith('ppp'):
-            info['wan'] = {'protocol': cells[3], 'ip': cells[4], 'status': cells[6]}
-    return {
-        'model': info.get('Device Name'),
-        'firmware': info.get('Firmware Version'),
-        'uptime': info.get('Uptime'),
-        'cpu': info.get('CPU Usage'),
-        'memory': info.get('Memory Usage'),
-        'wan': info.get('wan'),
-    }
-
-
-def parse_dhcp(page):
-    leases = {}
-    for _, cells in _rows(page):
-        if len(cells) >= 3 and _IP.match(cells[0]) and _mac(cells[1]):
-            leases[_mac(cells[1])] = {'ip': cells[0], 'lease': _int(cells[2])}
-    return leases
-
-
-def parse_arp(page):
-    return {_mac(c[1]): c[0] for _, c in _rows(page) if len(c) >= 2 and _IP.match(c[0]) and _mac(c[1])}
-
-
-def parse_stations(page):
-    stations = {}
-    for _, c in _rows(page):
-        if len(c) >= 14 and _mac(c[0]):
-            stations[_mac(c[0])] = {
-                'linkMbps': _int(c[1]),
-                'txBytes': _int(c[5]),
-                'rxBytes': _int(c[6]),
-                'rssi': _int(c[7]),
-                'uptime': _int(c[13]),
-            }
-    return stations
-
-
-def parse_mac_rules(page):
-    start = page.find('name="formFilterDel"')
-    section = page[start:page.find('</form>', start)] if start >= 0 else ''
-    rules = []
-    for row, cells in _rows(section):
-        box = re.search(r'<input[^>]*type=["\']?checkbox[^>]*>', row, re.I)
-        if not box or len(cells) < 5:
-            continue
-        name = re.search(r'name=["\']?([\w\[\]]+)', box.group(0))
-        value = re.search(r'value=["\']?([^"\'\s>]+)', box.group(0))
-        rules.append({
-            'field': name.group(1) if name else None,
-            'value': value.group(1) if value else 'on',
-            'direction': cells[1],
-            'src': _mac(cells[2]),
-            'action': cells[4],
-        })
-    return rules
-
-
-_SHAPING_RULE = re.compile(r'traffictlRules(?:\.push\(|\[\d+\]\s*=)(.*?)\)\s*;', re.S)
-_SHAPING_PAIR = re.compile(r'new it\(\s*"(\w+)"\s*,\s*(?:"([^"]*)"|([^)\s]*))\s*\)|(\w+)\s*:\s*(?:"([^"]*)"|([^,}\s]*))')
-
-
-def parse_shaping(page):
-    rules = []
-    for match in _SHAPING_RULE.finditer(page):
-        pairs = {}
-        for g in _SHAPING_PAIR.findall(match.group(1)):
-            key, value = (g[0], g[1] or g[2]) if g[0] else (g[3], g[4] or g[5])
-            pairs[key] = value.strip()
-        if 'rate' in pairs:
-            rules.append({
-                'id': pairs.get('id'),
-                'srcip': pairs.get('srcip'),
-                'dstip': pairs.get('dstip'),
-                'rate': _int(pairs['rate']),
-                'direction': 'down' if pairs.get('direction') == '1' else 'up',
-            })
-    return rules
-
-
-def shaping_fields(ip, rate, direction):
-    """Fields of net_qos_traffictl_edit.asp, in page order, for one per-device IPv4 limit.
-
-    direction: 1 = Downstream (match the device as destination), 0 = Upstream (as source).
-    """
-    down = direction == 1
-    src, src_mask = ('', '') if down else (ip, '255.255.255.255')
-    dst, dst_mask = (ip, '255.255.255.255') if down else ('', '')
-    lst = ('dummy=dummy&inf=%s&proto=0&IPversion=1&srcip=%s&srcnetmask=%s&dstip=%s&dstnetmask=%s'
-           '&sport=&dport=&rate=%d&direction=%d' % (WAN_IFACE, src, src_mask, dst, dst_mask, rate, direction))
-    return [
-        ('IpProtocolType', '1'), ('direction', str(direction)), ('vlanID', ''), ('protolist', '0'),
-        ('srcip', src), ('srcnetmask', src_mask), ('dstip', dst), ('dstnetmask', dst_mask),
-        ('sip6', ''), ('sip6PrefixLen', ''), ('dip6', ''), ('dip6PrefixLen', ''),
-        ('sport', ''), ('dport', ''), ('rate', str(rate)),
-        ('lst', base64.b64encode(lst.encode('ascii')).decode('ascii')),
-        ('submit-url', '/net_qos_traffictl.asp'),
-    ]
-
-
-# --- Device names from the router's DNS (it registers DHCP host names) ---
+# --- Device names from the router's DNS (most home routers register DHCP host names) ---
 
 def _skip_name(data, offset):
     while True:
@@ -357,7 +83,7 @@ def _read_name(data, offset):
     return '.'.join(labels)
 
 
-def lookup_hostname(ip):
+def lookup_hostname(ip, dns_server):
     qname = '.'.join(reversed(ip.split('.'))) + '.in-addr.arpa'
     tid = random.randint(0, 0xFFFF)
     query = struct.pack('>HHHHHH', tid, 0x0100, 1, 0, 0, 0)
@@ -366,7 +92,7 @@ def lookup_hostname(ip):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.settimeout(0.6)
-            s.sendto(query, (ROUTER_IP, 53))
+            s.sendto(query, (dns_server, 53))
             data = s.recv(512)
         if struct.unpack('>H', data[:2])[0] != tid or struct.unpack('>H', data[6:8])[0] == 0:
             return None
@@ -377,61 +103,112 @@ def lookup_hostname(ip):
         return None
 
 
-def own_ip():
+def own_ip(router_ip):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect((ROUTER_IP, 53))
+            s.connect((router_ip, 53))
             return s.getsockname()[0]
     except OSError:
         return None
 
 
+def _mac(value):
+    value = (value or '').strip().lower()
+    digits = re.sub(r'[^0-9a-f]', '', value)
+    if len(digits) != 12 or not re.fullmatch(r'[0-9a-f]{2}([:-]?)[0-9a-f]{2}(\1[0-9a-f]{2}){4}', value):
+        return None
+    return ':'.join(digits[i:i + 2] for i in range(0, 12, 2))
+
+
+def _int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _seconds(text):
+    """'3 days, 3:18', 'up 3days,03:18:27 / ...' or '45 min' -> seconds."""
+    text = (text or '').split('/')[0]
+    days = re.search(r'(\d+)\s*days?', text)
+    clock = re.search(r'(\d+):(\d+)(?::(\d+))?', text)
+    mins = re.search(r'(\d+)\s*min', text)
+    total = int(days.group(1)) * 86400 if days else 0
+    if clock:
+        total += int(clock.group(1)) * 3600 + int(clock.group(2)) * 60 + int(clock.group(3) or 0)
+    elif mins:
+        total += int(mins.group(1)) * 60
+    return total or None
+
+
+def _address_kind(ip):
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if address.version == 4 and address in CGNAT:
+        return 'cgnat'
+    if address.is_private:
+        return 'private'
+    return 'public'
+
+
 # --- Panel state and actions ---
 
 class Panel:
-    def __init__(self, router):
-        self.router = router
+    def __init__(self, driver, config):
+        self.router = driver
+        self.config = config
         self.lock = threading.RLock()
-        self.fast, self.fast_at = None, 0  # device lists, refreshed every few seconds
-        self.slow, self.slow_at = None, 0  # router status and rules, every 30 s or after a change
-        self.hostnames = {}                # ip -> (name, looked up at)
-        self.samples = {}                  # mac -> (time, txBytes, rxBytes) for live speeds
-        self.own_ip = own_ip()
+        self.cache = {}       # key -> (fetched at, value)
+        self.hostnames = {}   # ip -> (name, looked up at)
+        self.samples = {}     # mac -> (time, txBytes, rxBytes) for live speeds
+        self.own_ip = own_ip(driver.host)
+        self.diag = {'kind': None, 'host': None, 'started': 0, 'lines': [], 'done': True, 'same': 0}
         try:
-            with open(NICKNAMES_FILE) as f:
+            with open(NICKNAMES_FILE, encoding='utf-8') as f:
                 self.nicknames = json.load(f)
         except (OSError, ValueError):
             self.nicknames = {}
 
-    def _refresh(self, force=False):
+    def _cached(self, key, ttl, fetch, force=False):
         with self.lock:
-            now = time.time()
-            r = self.router
-            if force or not self.slow or now - self.slow_at > 30:
-                self.slow = {
-                    'router': parse_status(r.get('/status.asp')),
-                    'blocks': parse_mac_rules(r.get('/fw-macfilter.asp')),
-                    'limits': parse_shaping(r.get('/net_qos_traffictl.asp')),
-                }
-                self.slow_at = now
-            if force or not self.fast or now - self.fast_at > 4:
-                fast = {
-                    'dhcp': parse_dhcp(r.get('/dhcptbl.asp')),
-                    'arp': parse_arp(r.get('/arptable.asp')),
-                    'wifi5': r.stations(0),
-                    'wifi24': r.stations(1),
-                }
-                self._measure_speeds(fast, now)
-                ips = {v['ip'] for v in fast['dhcp'].values()} | set(fast['arp'].values())
-                for ip in ips:
-                    if ip not in self.hostnames or now - self.hostnames[ip][1] > 600:
-                        self.hostnames[ip] = (lookup_hostname(ip), now)
-                self.fast, self.fast_at = fast, now
-            return self.fast, self.slow
+            hit = self.cache.get(key)
+            if not force and hit and time.time() - hit[0] < ttl:
+                return hit[1]
+            value = fetch()
+            self.cache[key] = (time.time(), value)
+            return value
 
-    def _measure_speeds(self, fast, now):
-        for band in ('wifi5', 'wifi24'):
-            for mac, st in fast[band].items():
+    def _forget(self, *keys):
+        with self.lock:
+            for key in keys:
+                self.cache.pop(key, None)
+
+    # --- Devices ---
+
+    def _clients(self, force=False):
+        def fetch():
+            clients = self.router.clients()
+            self._measure_speeds(clients['stations'])
+            ips = {v['ip'] for v in clients['dhcp'].values()} | set(clients['arp'].values())
+            now = time.time()
+            for ip in ips:
+                if ip not in self.hostnames or now - self.hostnames[ip][1] > 600:
+                    self.hostnames[ip] = (lookup_hostname(ip, self.router.host), now)
+            return clients
+        return self._cached('clients', 4, fetch, force)
+
+    def _rules(self, force=False):
+        return self._cached('rules', 30, lambda: {'blocks': self.router.blocks(), 'limits': self.router.limits()}, force)
+
+    def _status(self, force=False):
+        return self._cached('status', 30, self.router.status, force)
+
+    def _measure_speeds(self, stations):
+        now = time.time()
+        for radio in stations.values():
+            for mac, st in radio.items():
                 prev = self.samples.get(mac)
                 if st['txBytes'] is None or st['rxBytes'] is None:
                     continue
@@ -441,69 +218,170 @@ class Panel:
                     st['downKbps'] = round((st['txBytes'] - prev[1]) * 8 / seconds / 1000)
                     st['upKbps'] = round((st['rxBytes'] - prev[2]) * 8 / seconds / 1000)
 
-    def _protected(self, ip, client_ip):
-        if ip == ROUTER_IP:
-            return 'The main router'
-        if ip == ACCESS_POINT_IP:
-            return 'The first-floor access point. Blocking it would cut off the whole floor.'
+    def _protected_macs(self, clients):
+        """{mac: reason} for every protected device, resolved to its MAC.
+
+        Blocking and limiting act on the MAC, so protection must too: a protected device
+        must stay protected even when its IP is momentarily missing from the lease/ARP
+        tables or has changed since config was written. config['protect'] keys may be IPs
+        (resolved here against the current tables) or MACs (used directly).
+        """
+        ip_to_mac = {v['ip']: m for m, v in clients['dhcp'].items() if v.get('ip')}
+        ip_to_mac.update({ip: m for m, ip in clients['arp'].items()})
+        out = {}
+        for key, reason in self.config['protect'].items():
+            as_mac = _mac(key)
+            if as_mac:
+                out[as_mac] = reason
+            elif key in ip_to_mac:
+                out[ip_to_mac[key]] = reason
+        if self.own_ip and self.own_ip in ip_to_mac:
+            out.setdefault(ip_to_mac[self.own_ip], 'This computer runs the panel')
+        return out
+
+    def _protected(self, mac, ip, client_ip, protected_macs):
+        if ip and ip == self.router.host:
+            return 'The router itself'
+        if mac in protected_macs:
+            return protected_macs[mac]
+        if ip and ip in self.config['protect']:
+            return self.config['protect'][ip]
         if ip and ip == self.own_ip:
             return 'This computer runs the panel'
         if ip and ip == client_ip:
             return "The device you're using right now"
         return None
 
-    def _devices(self, fast, slow, client_ip):
-        macs = list(fast['dhcp'])
-        for source in (fast['arp'], fast['wifi5'], fast['wifi24'], [r['src'] for r in slow['blocks']]):
+    def _interfaces(self, clients):
+        names = self.config['interfaceNames']
+        found = []
+        for radio_id, radio in sorted(clients['radios'].items(), key=lambda r: r[1]['band'], reverse=True):
+            found.append({'id': radio_id, 'kind': 'wifi', 'band': radio['band'],
+                          'label': names.get(radio_id) or '%s GHz Wi-Fi' % radio['band']})
+        for port in sorted(set(clients['ports'].values()) - set(clients['radios'])):
+            found.append({'id': port, 'kind': 'lan', 'band': None, 'label': names.get(port) or port + ' (cable)'})
+        return found
+
+    def _devices(self, clients, rules, client_ip):
+        macs = list(clients['dhcp'])
+        stations = clients['stations']
+        sources = [clients['arp']] + list(stations.values()) + [[r['src'] for r in rules['blocks']]]
+        for source in sources:
             macs += [m for m in source if m and m not in macs]
+        protected_macs = self._protected_macs(clients)
         devices = []
         for mac in macs:
-            lease = fast['dhcp'].get(mac) or {}
-            ip = lease.get('ip') or fast['arp'].get(mac)
-            wifi = fast['wifi5'].get(mac) or fast['wifi24'].get(mac)
-            band = '5' if mac in fast['wifi5'] else '2.4' if mac in fast['wifi24'] else None
-            if ip == ACCESS_POINT_IP:
-                where = 'ap'
-            elif band:
-                where = 'ground-5' if band == '5' else 'ground-24'
-            else:
-                where = 'upstairs'
-            limits = [r for r in slow['limits'] if ip and ip in (r['srcip'], r['dstip'])]
+            lease = clients['dhcp'].get(mac) or {}
+            ip = lease.get('ip') or clients['arp'].get(mac)
+            radio = next((radio_id for radio_id, found in stations.items() if mac in found), None)
+            wifi = stations[radio][mac] if radio else None
+            limits = [r for r in rules['limits'] if ip and ip in (r['srcip'], r['dstip'])]
             devices.append({
                 'mac': mac,
                 'ip': ip,
                 'hostname': self.hostnames.get(ip, (None,))[0] if ip else None,
                 'nickname': self.nicknames.get(mac),
-                'where': where,
-                'online': bool(wifi) or mac in fast['arp'],
+                'iface': radio or clients['ports'].get(mac),
+                'online': bool(wifi) or mac in clients['arp'],
                 'privateMac': bool(int(mac[:2], 16) & 2),
                 'lease': lease.get('lease'),
                 'wifi': wifi,
-                'blocked': any(r['src'] == mac and r['action'].lower() == 'deny' for r in slow['blocks']),
+                'blocked': any(r['src'] == mac and r['action'].lower() == 'deny' for r in rules['blocks']),
                 'limit': {
                     'down': next((r['rate'] for r in limits if r['direction'] == 'down'), None),
                     'up': next((r['rate'] for r in limits if r['direction'] == 'up'), None),
                 },
-                'protected': self._protected(ip, client_ip),
+                'protected': self._protected(mac, ip, client_ip, protected_macs),
             })
         return devices
 
     def state(self, client_ip):
-        fast, slow = self._refresh()
+        with self.lock:  # read the cache timestamp atomically with the fetch (login() can clear the cache)
+            clients, rules = self._clients(), self._rules()
+            updated = int(self.cache['clients'][0])
+            status = self._status()
         return {
-            'router': slow['router'],
-            'devices': self._devices(fast, slow, client_ip),
-            'updated': int(self.fast_at),
+            'router': status,
+            'family': self.router.family,
+            'capabilities': sorted(self.router.capabilities),
+            'interfaces': self._interfaces(clients),
+            'devices': self._devices(clients, rules, client_ip),
+            'updated': updated,
             'minLimitKbps': MIN_LIMIT_KBPS,
         }
+
+    # --- Internet, Wi-Fi and security views (read-only) ---
+
+    def internet(self, client_ip):
+        status = self._status()
+        info = self._cached('internet', 30, self.router.internet)
+        wan = dict(status.get('wan') or {})
+        wan['addressKind'] = _address_kind(wan.get('ip'))
+        wan['upSeconds'] = _seconds(wan.get('status'))
+        uptime = _seconds(status.get('uptime'))
+        fibre = info.get('fibre')
+        return {'router': status, 'wan': wan, 'uptimeSeconds': uptime, 'ipv6': info['ipv6'], 'fibre': fibre,
+                'ports': info['ports'], 'interfaces': info['interfaces'], 'dns': status.get('dns') or []}
+
+    def wifi(self, client_ip):
+        radios = self._cached('radios', 120, self.router.radios)
+        neighbours = self._cached('neighbours', 300, self.router.neighbours)
+        clients = self._clients()
+        counts = {radio_id: len(found) for radio_id, found in clients['stations'].items()}
+        # An access point on your LAN (e.g. a second router in AP mode) usually beacons with
+        # the same MAC it uses for its DHCP lease, so a neighbour BSSID with a lease is yours.
+        yours = {r['bssid'] for r in radios} | set(clients['dhcp'])
+        for n in neighbours:
+            n['yours'] = n['bssid'] in yours
+        return {'radios': [dict(r, clients=counts.get(r['id'], 0)) for r in radios], 'neighbours': neighbours}
+
+    def security(self, client_ip):
+        settings = self._cached('security', 120, self.router.security)
+        radios = self._cached('radios', 120, self.router.radios)
+        status = self._status()
+        return {'checks': security_checks(settings, radios, status)}
+
+    # --- Diagnostics ---
+
+    def diag_start(self, body, client_ip):
+        kind, host = str(body.get('kind') or ''), str(body.get('host') or '').strip()
+        if kind not in ('ping', 'traceroute') or kind not in self.router.capabilities:
+            raise ValueError('Unknown diagnostic')
+        with self.lock:
+            if not self.diag['done'] and time.time() - self.diag['started'] < 90:
+                raise ValueError('A %s is still running. Wait for it to finish.' % self.diag['kind'])
+            self.router.start_diag(kind, host)
+            self.diag = {'kind': kind, 'host': host, 'started': time.time(), 'lines': [], 'done': False, 'same': 0}
+        return {'ok': True}
+
+    def diag_poll(self, client_ip):
+        with self.lock:
+            d = self.diag
+            if d['kind'] and not d['done']:
+                lines = self.router.diag_output(d['kind'])
+                d['same'] = d['same'] + 1 if lines == d['lines'] and lines else 0
+                d['lines'] = lines
+                text = '\n'.join(lines).lower()
+                if d['kind'] == 'ping':
+                    finished = 'packet loss' in text
+                else:
+                    # "traceroute to 1.1.1.1 (1.1.1.1), ..." then one line per hop; done when the target answers
+                    target = re.search(r'traceroute to \S+ \(([^)]+)\)', text)
+                    last = lines[-1].lower() if len(lines) > 1 else ''
+                    finished = bool(target and '(%s)' % target.group(1) in last) or d['same'] >= 6
+                if finished or time.time() - d['started'] > 90:
+                    d['done'] = True
+            return {k: d[k] for k in ('kind', 'host', 'lines', 'done', 'started')}
+
+    # --- Changes ---
 
     def _find(self, body, client_ip):
         mac = _mac(body.get('mac'))
         if not mac:
             raise ValueError('Missing or invalid MAC address')
-        fast, slow = self._refresh(force=True)
-        device = next((d for d in self._devices(fast, slow, client_ip) if d['mac'] == mac), None)
-        return mac, device, slow
+        clients, rules = self._clients(force=True), self._rules(force=True)
+        device = next((d for d in self._devices(clients, rules, client_ip) if d['mac'] == mac), None)
+        return mac, device, rules
 
     @staticmethod
     def _label(device, mac):
@@ -517,43 +395,21 @@ class Panel:
             if device['protected']:
                 raise ValueError('Protected: ' + device['protected'])
             if not device['blocked']:
-                self.router.post_form('/boaform/admin/formFilter', [
-                    ('dir', '0'), ('srcmac', mac.replace(':', '')), ('dstmac', ''),
-                    ('filterMode', 'Deny'), ('addFilterMac', 'Add'),
-                    ('submit-url', '/admin/fw-macfilter.asp'),
-                ], referer='/admin/fw-macfilter.asp')
-            _, slow = self._refresh(force=True)
-            if not any(r['src'] == mac and r['action'].lower() == 'deny' for r in slow['blocks']):
+                self.router.block(mac)
+            rules = self._rules(force=True)
+            if not any(r['src'] == mac and r['action'].lower() == 'deny' for r in rules['blocks']):
                 raise RouterError('The router did not save the block rule')
             return {'ok': True, 'message': '%s is blocked' % self._label(device, mac)}
 
     def unblock(self, body, client_ip):
         with self.lock:
-            mac, device, slow = self._find(body, client_ip)
-            rules = [r for r in slow['blocks'] if r['src'] == mac]
-            if rules:
-                if not all(r['field'] for r in rules):
-                    raise RouterError("Couldn't find this rule's checkbox on the MAC Filtering page")
-                self.router.post_form(
-                    '/boaform/admin/formFilter',
-                    [(r['field'], r['value']) for r in rules]
-                    + [('deleteSelFilterMac', 'Delete Selected'), ('submit-url', '/admin/fw-macfilter.asp')],
-                    referer='/admin/fw-macfilter.asp')
-                _, slow = self._refresh(force=True)
-                if any(r['src'] == mac for r in slow['blocks']):
+            mac, device, rules = self._find(body, client_ip)
+            mine = [r for r in rules['blocks'] if r['src'] == mac]
+            if mine:
+                self.router.unblock(mine)
+                if any(r['src'] == mac for r in self._rules(force=True)['blocks']):
                     raise RouterError('The router did not remove the block rule')
             return {'ok': True, 'message': '%s is unblocked' % self._label(device, mac)}
-
-    def _remove_limits(self, ip, slow):
-        ids = [r['id'] for r in slow['limits'] if ip in (r['srcip'], r['dstip'])]
-        if not ids:
-            return
-        if not all(ids):
-            raise RouterError("Couldn't read the Traffic Shaping rule IDs")
-        self.router.post_form('/boaform/admin/formQosTraffictl', [
-            ('lst', 'applysetting#id=' + '|'.join(ids)),
-            ('submit-url', '/net_qos_traffictl.asp'),
-        ], referer='/net_qos_traffictl.asp')
 
     @staticmethod
     def _rate(value):
@@ -569,19 +425,20 @@ class Panel:
         if not down and not up:
             raise ValueError('Set a download or upload limit')
         with self.lock:
-            mac, device, slow = self._find(body, client_ip)
+            mac, device, rules = self._find(body, client_ip)
             if not device or not device['ip']:
                 raise ValueError('That device has no IP address right now')
             if device['protected']:
                 raise ValueError('Protected: ' + device['protected'])
             ip = device['ip']
-            self._remove_limits(ip, slow)
-            for direction, rate in ((1, down), (0, up)):
+            ids = [r['id'] for r in rules['limits'] if ip in (r['srcip'], r['dstip'])]
+            if ids:
+                self.router.remove_limits(ids)
+            for direction, rate in (('down', down), ('up', up)):
                 if rate:
-                    self.router.post_form('/boaform/admin/formQosTraffictlEdit', shaping_fields(ip, rate, direction),
-                                          referer='/net_qos_traffictl_edit.asp')
-            _, slow = self._refresh(force=True)
-            saved = {(r['direction'], r['rate']) for r in slow['limits'] if ip in (r['srcip'], r['dstip'])}
+                    self.router.add_limit(ip, rate, direction)
+            rules = self._rules(force=True)
+            saved = {(r['direction'], r['rate']) for r in rules['limits'] if ip in (r['srcip'], r['dstip'])}
             wanted = {('down', down), ('up', up)} - {('down', None), ('up', None)}
             if not wanted <= saved:
                 raise RouterError('The router did not save the speed limit')
@@ -589,12 +446,12 @@ class Panel:
 
     def unlimit(self, body, client_ip):
         with self.lock:
-            mac, device, slow = self._find(body, client_ip)
+            mac, device, rules = self._find(body, client_ip)
             ip = device and device['ip']
-            if ip:
-                self._remove_limits(ip, slow)
-                _, slow = self._refresh(force=True)
-                if any(ip in (r['srcip'], r['dstip']) for r in slow['limits']):
+            ids = [r['id'] for r in rules['limits'] if ip and ip in (r['srcip'], r['dstip'])]
+            if ids:
+                self.router.remove_limits(ids)
+                if any(ip in (r['srcip'], r['dstip']) for r in self._rules(force=True)['limits']):
                     raise RouterError('The router did not remove the speed limit')
             return {'ok': True, 'message': 'Speed limit removed for %s' % self._label(device, mac)}
 
@@ -608,7 +465,7 @@ class Panel:
                 self.nicknames[mac] = name
             else:
                 self.nicknames.pop(mac, None)
-            with open(NICKNAMES_FILE, 'w') as f:
+            with open(NICKNAMES_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.nicknames, f, indent=2)
         return {'ok': True}
 
@@ -618,8 +475,107 @@ class Panel:
             raise ValueError('Enter the router username and password')
         self.router.login(username, password)
         with self.lock:
-            self.fast = self.slow = None
+            self.cache.clear()
         return {'ok': True}
+
+
+def security_checks(s, radios, status):
+    """Turn raw settings into a check-up list: {id, level: good|info|warn|bad, title, detail}."""
+    checks = []
+
+    def add(check_id, level, title, detail):
+        checks.append({'id': check_id, 'level': level, 'title': title, 'detail': detail})
+
+    def bands(items):
+        return ' and '.join('%s GHz' % r['band'] for r in items)
+
+    # A disabled radio's WPS/encryption/PMF settings don't matter — judge only the active ones.
+    active = [r for r in radios if r.get('enabled')]
+
+    wps_on = [r for r in active if r['wps']['enabled']]
+    if wps_on and any(r['wps']['defaultPin'] for r in wps_on):
+        add('wps', 'bad', 'WPS is on, with the factory PIN',
+            'WPS is enabled on %s and the router PIN is %s, a default that many routers of this chipset share.'
+            % (bands(wps_on), wps_on[0]['wps']['pin']))
+    elif wps_on:
+        add('wps', 'warn', 'WPS is on', 'WPS is enabled on %s.' % bands(wps_on))
+    else:
+        add('wps', 'good', 'WPS is off', 'Neither radio accepts WPS PIN or push-button pairing.')
+
+    weak = [r for r in active if r['security'] not in ('WPA2', 'WPA3', 'WPA2/WPA3 transition')
+            or (r.get('cipher') or '').startswith('TKIP')]
+    if weak:
+        add('wifi-encryption', 'bad', 'Weak Wi-Fi encryption',
+            ', '.join('%s GHz uses %s %s' % (r['band'], r['security'], r.get('cipher') or '') for r in weak))
+    elif active:
+        add('wifi-encryption', 'good', 'Wi-Fi encryption is strong',
+            ', '.join('%s GHz: %s-%s, %s' % (r['band'], r['security'], 'PSK' if 'PSK' in (r.get('auth') or '')
+                                            else 'Enterprise', r.get('cipher')) for r in active))
+
+    no_pmf = [r for r in active if r.get('pmf') == 'off']
+    if no_pmf:
+        add('pmf', 'warn', 'Management frames are unprotected',
+            '802.11w (Protected Management Frames) is off on %s.' % bands(no_pmf))
+
+    wan_rules = [r for r in s['acl']['rules'] if r['enabled'] and r['side'].upper() == 'WAN']
+    exposed = [r for r in wan_rules if r['services'].lower() not in ('ping', 'icmp', '')]
+    if not s['acl']['enabled']:
+        add('remote-admin', 'warn', 'Admin access list is off',
+            'The router does not restrict which addresses can open its management services.')
+    elif exposed:
+        add('remote-admin', 'bad', 'Router admin is reachable from the internet',
+            'WAN-side access list allows: %s.' % ', '.join(r['services'] for r in exposed))
+    else:
+        add('remote-admin', 'good', 'Router admin is LAN-only',
+            'From the internet side the router only answers %s.' % (', '.join(r['services'] for r in wan_rules) or 'nothing'))
+
+    add('upnp', 'good' if not s['upnp'] else 'info', 'UPnP is %s' % ('on' if s['upnp'] else 'off'),
+        'Devices %s open ports on the router by themselves.' % ('can' if s['upnp'] else 'cannot'))
+
+    if s['dmz']['enabled']:
+        add('dmz', 'warn', 'DMZ host is set', 'All unsolicited inbound IPv4 goes to %s.' % s['dmz']['host'])
+    else:
+        add('dmz', 'good', 'No DMZ host', 'Unsolicited inbound IPv4 is not sent to any device.')
+
+    forwards = s['portForwarding']['rules']
+    if forwards:
+        add('port-forwarding', 'info', '%d port forward%s' % (len(forwards), '' if len(forwards) == 1 else 's'),
+            ', '.join('%s %s -> %s:%s' % (f['protocol'], f.get('publicPort') or f['localPort'], f['localIp'],
+                                          f['localPort']) for f in forwards))
+    else:
+        add('port-forwarding', 'good', 'No port forwards', 'No inbound ports are mapped to devices.')
+
+    if s['ipv6']:
+        if s['ipv6Filter']['incoming'] == 'deny':
+            add('ipv6-inbound', 'good', 'IPv6 inbound is blocked',
+                'Your devices have public IPv6 addresses, and the IPv6 firewall drops unsolicited inbound traffic.')
+        else:
+            add('ipv6-inbound', 'bad', 'IPv6 inbound is allowed',
+                'Your devices have public IPv6 addresses and the IPv6 firewall lets unsolicited inbound traffic in.')
+
+    wan = status.get('wan') or {}
+    kind = _address_kind(wan.get('ip'))
+    if kind in ('cgnat', 'private'):
+        add('cgnat', 'info', 'Behind carrier-grade NAT',
+            'The router\'s WAN IPv4 is %s, which is not a public address.' % wan.get('ip'))
+    if 'TR069' in (wan.get('type') or '').upper():
+        add('tr069', 'info', 'The ISP can manage this router',
+            'The WAN connection type is %s, so the ISP\'s TR-069 server can read and change settings.' % wan.get('type'))
+
+    build = re.search(r'e(\d{2})(\d{2})(\d{2})', status.get('firmware') or '')
+    add('firmware', 'info', 'Firmware %s' % (status.get('firmware') or 'unknown'),
+        'Built 20%s-%s-%s. Firmware is pushed by the ISP; there is no self-update.' % build.groups()
+        if build else 'Firmware is pushed by the ISP.')
+
+    guests = sum(r['guestNetworks']['used'] for r in radios)
+    slots = sum(r['guestNetworks']['slots'] for r in radios)
+    if slots:
+        add('guest', 'info', 'Guest networks: %d of %d in use' % (guests, slots),
+            'Each radio can broadcast up to %d extra SSIDs.' % radios[0]['guestNetworks']['slots'])
+
+    order = {'bad': 0, 'warn': 1, 'info': 2, 'good': 3}
+    checks.sort(key=lambda c: order[c['level']])
+    return checks
 
 
 # --- HTTP server ---
@@ -638,6 +594,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
+        self.send_header('X-Content-Type-Options', 'nosniff')
         self.end_headers()
         self.wfile.write(body)
 
@@ -670,15 +627,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except RouterError as e:
             self._json(502, {'error': str(e)})
 
+    def _static(self, path):
+        name = 'index.html' if path in ('/', '') else path.lstrip('/')
+        full = os.path.join(WEB, name)
+        if '/' in name or '\\' in name or os.path.splitext(name)[1] not in STATIC_TYPES or not os.path.isfile(full):
+            return self._json(404, {'error': 'Not found'})
+        with open(full, 'rb') as f:
+            body = f.read()
+        kind = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+        if kind.startswith('text/') or kind == 'application/javascript':
+            kind += '; charset=utf-8'
+        self._send(200, body, kind)
+
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
-        if path in ('/', '/index.html') and self._allowed(api=False):
-            with open(os.path.join(HERE, 'index.html'), 'rb') as f:
-                self._send(200, f.read(), 'text/html; charset=utf-8')
-        elif path == '/api/state' and self._allowed(api=True):
-            self._call(self.panel.state, self.client_address[0])
-        elif path not in ('/', '/index.html', '/api/state'):
+        views = {
+            '/api/state': self.panel.state,
+            '/api/internet': self.panel.internet,
+            '/api/wifi': self.panel.wifi,
+            '/api/security': self.panel.security,
+            '/api/diag': self.panel.diag_poll,
+        }
+        if path in views:
+            if self._allowed(api=True):
+                self._call(views[path], self.client_address[0])
+        elif path.startswith('/api/'):
             self._json(404, {'error': 'Not found'})
+        elif self._allowed(api=False):
+            self._static(path)
 
     def do_POST(self):
         actions = {
@@ -688,6 +664,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '/api/unlimit': self.panel.unlimit,
             '/api/name': self.panel.rename,
             '/api/login': self.panel.login,
+            '/api/diag': self.panel.diag_start,
         }
         fn = actions.get(urllib.parse.urlparse(self.path).path)
         if not fn:
@@ -702,7 +679,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Home network panel for the OVT OP2200H router')
+    parser = argparse.ArgumentParser(description='fun-router: a fun, explained console for your router')
     parser.add_argument('--port', type=int, default=8787)
     parser.add_argument('--lan', action='store_true', help='also listen on the Wi-Fi so phones can use it')
     parser.add_argument('--pin', help='PIN that other devices must enter (required with --lan)')
@@ -710,14 +687,16 @@ def main():
     if args.lan and not args.pin:
         parser.error('--lan needs --pin, otherwise anyone on your Wi-Fi could block devices')
 
-    Handler.panel = Panel(Router())
+    config = load_config()
+    mimetypes.add_type('application/javascript', '.js')
+    Handler.panel = Panel(make_driver(config['driver'], config['router']), config)
     Handler.pin = args.pin
     bind = '0.0.0.0' if args.lan else '127.0.0.1'
     lan_ip = Handler.panel.own_ip
     if args.lan and lan_ip:
         Handler.hosts = Handler.hosts | {lan_ip}
     server = http.server.ThreadingHTTPServer((bind, args.port), Handler)
-    print('Router panel: http://127.0.0.1:%d' % args.port)
+    print('fun-router: http://127.0.0.1:%d  (router %s, %s)' % (args.port, config['router'], config['driver']))
     if args.lan and lan_ip:
         print('On your Wi-Fi:  http://%s:%d  (PIN required)' % (lan_ip, args.port))
     try:

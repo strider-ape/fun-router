@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fun-router</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' fill='%23FFD23F' stroke='%23111' stroke-width='3'/%3E%3Cpath d='M9 22v-4M14 22v-8M19 22v-12M24 22v-16' stroke='%23111' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <div class="title-block">
+      <p class="eyebrow" id="eyebrow">fun-router · home network</p>
+      <h1>Your router,<br><span class="hl">explained.</span></h1>
+    </div>
+    <section class="router-card box" aria-label="Router">
+      <div class="router-top">
+        <div>
+          <div class="router-name" id="r-name">Router</div>
+          <div class="router-sub" id="r-sub">Connecting…</div>
+        </div>
+        <span class="net-pill" id="r-net">…</span>
+      </div>
+      <dl class="router-facts">
+        <div><dt>Uptime</dt><dd id="r-up">—</dd></div>
+        <div><dt>CPU</dt><dd id="r-cpu">—</dd></div>
+        <div><dt>Memory</dt><dd id="r-mem">—</dd></div>
+      </dl>
+      <div class="router-actions">
+        <button class="btn btn-main" id="refresh" type="button">Refresh</button>
+        <button class="btn" id="explain-all" type="button" aria-pressed="false" title="Open every explanation on the page">Explain all</button>
+        <button class="btn" id="theme" type="button" aria-label="Switch colour theme">Theme</button>
+      </div>
+    </section>
+  </header>
+
+  <div class="banner box" id="banner" role="status">
+    <p id="banner-text"></p>
+    <button class="btn" id="banner-btn" type="button"></button>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="Sections">
+    <button class="tab" role="tab" id="tab-devices" data-tab="devices" aria-controls="view-devices">Devices</button>
+    <button class="tab" role="tab" id="tab-internet" data-tab="internet" aria-controls="view-internet">Internet</button>
+    <button class="tab" role="tab" id="tab-wifi" data-tab="wifi" aria-controls="view-wifi">Wi-Fi</button>
+    <button class="tab" role="tab" id="tab-security" data-tab="security" aria-controls="view-security">Security <span class="tab-badge" id="sec-badge" hidden></span></button>
+    <button class="tab" role="tab" id="tab-tools" data-tab="tools" aria-controls="view-tools">Tools</button>
+  </nav>
+
+  <main>
+    <section id="view-devices" role="tabpanel" aria-labelledby="tab-devices">
+      <section class="stats" id="stats" aria-label="Summary"></section>
+      <div class="toolbar">
+        <div class="chips" id="chips" role="group" aria-label="Filter devices"></div>
+        <label class="sr" for="q">Search devices</label>
+        <input class="search" id="q" type="search" placeholder="Search name, IP, MAC" autocomplete="off">
+      </div>
+      <div id="devices-explain"></div>
+      <div class="grid" id="grid" aria-live="polite">
+        <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+      </div>
+    </section>
+
+    <section id="view-internet" role="tabpanel" aria-labelledby="tab-internet" hidden>
+      <div class="panels" id="internet"><div class="skeleton"></div><div class="skeleton"></div></div>
+    </section>
+
+    <section id="view-wifi" role="tabpanel" aria-labelledby="tab-wifi" hidden>
+      <div class="panels" id="wifi"><div class="skeleton"></div><div class="skeleton"></div></div>
+    </section>
+
+    <section id="view-security" role="tabpanel" aria-labelledby="tab-security" hidden>
+      <div id="security"><div class="skeleton"></div></div>
+    </section>
+
+    <section id="view-tools" role="tabpanel" aria-labelledby="tab-tools" hidden>
+      <div class="panels" id="tools"></div>
+    </section>
+  </main>
+
+  <footer class="page-foot">
+    <span id="updated">Talking to the router…</span>
+    <span id="foot-scope">Changes it can make: block, unblock, speed limit. Everything else is read-only.</span>
+  </footer>
+</div>
+
+<dialog id="dlg-confirm" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <div class="dlg-head" id="confirm-head"><h2 id="confirm-title"></h2></div>
+    <div class="dlg-body"><p id="confirm-text"></p></div>
+    <div class="dlg-foot">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn" id="confirm-ok" value="ok"></button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-limit" aria-labelledby="limit-title">
+  <form method="dialog" id="limit-form">
+    <div class="dlg-head c-orange"><h2 id="limit-title">Limit speed</h2></div>
+    <div class="dlg-body">
+      <fieldset class="rate" data-dir="down">
+        <legend>Download (to the device)</legend>
+        <div class="presets"></div>
+      </fieldset>
+      <fieldset class="rate" data-dir="up">
+        <legend>Upload (from the device)</legend>
+        <div class="presets"></div>
+      </fieldset>
+      <p class="note" id="limit-note"></p>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn btn-go" id="limit-remove" type="button">Remove limit</button>
+      <span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn btn-main" id="limit-apply" type="button">Apply limit</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-rename" aria-labelledby="rename-title">
+  <form method="dialog" id="rename-form">
+    <div class="dlg-head c-lilac"><h2 id="rename-title">Name this device</h2></div>
+    <div class="dlg-body">
+      <label class="field">Name<input id="rename-input" maxlength="40" autocomplete="off"></label>
+      <p class="note" id="rename-note"></p>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" id="rename-reset" type="button">Use router name</button>
+      <span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn btn-main" id="rename-save" type="submit" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-login" aria-labelledby="login-title">
+  <form method="dialog" id="login-form">
+    <div class="dlg-head c-yellow"><h2 id="login-title">Log in to the router</h2></div>
+    <div class="dlg-body">
+      <p>The router ties its login to this computer's IP address and drops it after a few idle minutes. Log in here and the panel logs back in for you while it runs.</p>
+      <label class="field">Username<input id="login-user" autocomplete="username" required></label>
+      <label class="field">Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <p class="note">Sent only to your router. The panel keeps it in memory to log back in, and never writes it to disk. You can also log in to the router's own page in any browser on this computer.</p>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" value="cancel" formnovalidate>Later</button>
+      <button class="btn btn-main" id="login-go" type="submit" value="login">Log in</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-pin" aria-labelledby="pin-title">
+  <form method="dialog" id="pin-form">
+    <div class="dlg-head c-lilac"><h2 id="pin-title">Enter the panel PIN</h2></div>
+    <div class="dlg-body">
+      <label class="field">PIN<input id="pin-input" inputmode="numeric" autocomplete="off" required></label>
+      <p class="note">This is the PIN set when the panel was started with --lan.</p>
+    </div>
+    <div class="dlg-foot"><button class="btn btn-main" type="submit" value="pin">Unlock</button></div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="explain.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

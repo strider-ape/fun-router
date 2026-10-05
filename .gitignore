@@ -1,5 +1,6 @@
-# Device nicknames are personal and written at runtime
+# Device nicknames and your network's config are personal (see config.example.json)
 nicknames.json
+config.json
 __pycache__/
 .DS_Store
 

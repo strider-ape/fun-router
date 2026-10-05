@@ -1,0 +1,10 @@
+{
+  "router": "192.168.1.1",
+  "driver": "realtek-boa",
+  "protect": {
+    "192.168.1.3": "The access point. Blocking it would cut off every device behind it."
+  },
+  "interfaceNames": {
+    "LAN1": "LAN1 (access point + cable)"
+  }
+}
