@@ -1,0 +1,2 @@
+# Same line endings on Windows, Linux and macOS, so switching laptops shows no fake diffs
+* text=auto eol=lf

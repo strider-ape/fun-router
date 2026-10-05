@@ -1,0 +1,13 @@
+# Device nicknames are personal and written at runtime
+nicknames.json
+__pycache__/
+.DS_Store
+
+# Local-only files. This repo is public: keep network details, secrets and
+# Claude chat history out of it
+*.bundle
+claude-session/
+*.jsonl
+CLAUDE.local.md
+.claude/settings.local.json
+.env

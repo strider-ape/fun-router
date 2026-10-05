@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Network Panel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='28' height='28' fill='%23FFD23F' stroke='%23111' stroke-width='3'/%3E%3Cpath d='M9 22v-4M14 22v-8M19 22v-12M24 22v-16' stroke='%23111' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #FFF3DC;
+    --paper: #FFFFFF;
+    --ink: #111111;
+    --text: #111111;
+    --muted: #55504A;
+    --on-accent: #111111;
+    --yellow: #FFD23F;
+    --blue: #7DB8FF;
+    --mint: #6EEDB3;
+    --pink: #FF92C9;
+    --red: #FF5A4E;
+    --orange: #FF9E3D;
+    --lilac: #BBA2FF;
+    --grey: #D9D2C5;
+    --dot: rgba(17, 17, 17, 0.09);
+    --scrim: rgba(17, 17, 17, 0.5);
+    --line: 3px;
+    --shadow: 6px 6px 0 var(--ink);
+    --shadow-sm: 3px 3px 0 var(--ink);
+    --display: "Archivo Black", "Arial Black", Impact, sans-serif;
+    --body: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16140F; --paper: #23201A; --ink: #F4ECDD; --text: #F4ECDD; --muted: #BDB3A2;
+      --grey: #4A453C; --dot: rgba(244, 236, 221, 0.08); --scrim: rgba(0, 0, 0, 0.65);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16140F; --paper: #23201A; --ink: #F4ECDD; --text: #F4ECDD; --muted: #BDB3A2;
+    --grey: #4A453C; --dot: rgba(244, 236, 221, 0.08); --scrim: rgba(0, 0, 0, 0.65);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background-color: var(--bg);
+    background-image: radial-gradient(var(--dot) 1.5px, transparent 1.6px);
+    background-size: 22px 22px;
+    color: var(--text);
+    font: 500 16px/1.45 var(--body);
+  }
+  .wrap { max-width: 1220px; margin: 0 auto; padding: 28px 28px 56px; }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  .mono { font-family: var(--mono); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* Boxes and buttons */
+  .box { background: var(--paper); border: var(--line) solid var(--ink); box-shadow: var(--shadow); }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 44px; padding: 8px 16px;
+    background: var(--paper); color: var(--text);
+    border: var(--line) solid var(--ink); box-shadow: var(--shadow-sm);
+    font: 700 14px/1 var(--body); letter-spacing: 0.06em; text-transform: uppercase;
+    transition: transform 80ms ease, box-shadow 80ms ease;
+  }
+  .btn:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--ink); }
+  .btn:active { transform: translate(3px, 3px); box-shadow: 0 0 0 var(--ink); }
+  .btn:focus-visible, .chip:focus-visible, .icon-btn:focus-visible, input:focus-visible { outline: 3px dashed var(--ink); outline-offset: 3px; }
+  .btn[disabled] { opacity: 0.55; cursor: progress; transform: none; }
+  .btn-stop { background: var(--red); color: var(--on-accent); }
+  .btn-go { background: var(--mint); color: var(--on-accent); }
+  .btn-main { background: var(--yellow); color: var(--on-accent); }
+  .icon-btn {
+    width: 34px; height: 34px; flex: none; display: grid; place-items: center;
+    background: var(--paper); border: 2px solid var(--ink); box-shadow: 2px 2px 0 var(--ink);
+  }
+  .icon-btn:active { transform: translate(2px, 2px); box-shadow: none; }
+  .icon-btn svg { width: 16px; height: 16px; }
+
+  /* Masthead */
+  .masthead { display: flex; flex-wrap: wrap; gap: 24px; align-items: stretch; justify-content: space-between; margin-bottom: 28px; }
+  .title-block { flex: 1 1 420px; }
+  .eyebrow {
+    display: inline-block; margin: 0 0 14px; padding: 4px 10px;
+    background: var(--ink); color: var(--bg);
+    font: 700 12px/1.2 var(--mono); letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  h1 { margin: 0; font: 400 clamp(2.5rem, 7vw, 4.6rem)/0.92 var(--display); text-transform: uppercase; letter-spacing: -0.01em; }
+  h1 .hl { background: var(--yellow); color: var(--on-accent); padding: 0 0.12em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  .router-card { flex: 0 1 380px; padding: 16px 18px; display: grid; gap: 10px; align-content: start; }
+  .router-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .router-name { font: 400 22px/1 var(--display); text-transform: uppercase; }
+  .router-sub { font: 700 12px/1.3 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .net-pill { padding: 5px 10px; border: 2px solid var(--ink); font: 700 12px/1 var(--mono); text-transform: uppercase; color: var(--on-accent); white-space: nowrap; }
+  .net-pill.up { background: var(--mint); }
+  .net-pill.down { background: var(--red); }
+  .router-facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+  .router-facts div { border: 2px solid var(--ink); padding: 6px 8px; min-width: 0; }
+  .router-facts dt { font: 700 10px/1.2 var(--mono); letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .router-facts dd { margin: 2px 0 0; font: 700 14px/1.2 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .router-actions { display: flex; gap: 10px; }
+  .router-actions .btn { flex: 1; }
+
+  /* Banner */
+  .banner { display: none; margin-bottom: 24px; padding: 14px 18px; gap: 14px; align-items: center; flex-wrap: wrap; background: var(--orange); color: var(--on-accent); }
+  .banner.show { display: flex; }
+  .banner p { margin: 0; flex: 1 1 260px; font-weight: 700; }
+  .banner .btn { background: var(--paper); color: var(--text); }
+
+  /* Stats */
+  .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 16px; margin-bottom: 28px; }
+  .stat { padding: 14px 16px 12px; color: var(--on-accent); border: var(--line) solid var(--ink); box-shadow: var(--shadow); }
+  .stat b { display: block; font: 400 clamp(2rem, 4.4vw, 3rem)/1 var(--display); }
+  .stat span { font: 700 12px/1.25 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+  .c-yellow { background: var(--yellow); } .c-blue { background: var(--blue); } .c-mint { background: var(--mint); }
+  .c-pink { background: var(--pink); } .c-red { background: var(--red); } .c-orange { background: var(--orange); }
+  .c-lilac { background: var(--lilac); } .c-grey { background: var(--grey); }
+
+  /* Toolbar */
+  .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 22px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; flex: 1 1 600px; }
+  .chip {
+    min-height: 40px; padding: 6px 12px; background: var(--paper); border: 2px solid var(--ink); box-shadow: 2px 2px 0 var(--ink);
+    font: 700 13px/1 var(--body); letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); box-shadow: none; transform: translate(2px, 2px); }
+  .chip em { font-style: normal; font-family: var(--mono); opacity: 0.75; margin-left: 4px; }
+  .search { flex: 0 1 260px; min-width: 0; min-height: 44px; padding: 8px 12px; background: var(--paper); border: var(--line) solid var(--ink); box-shadow: var(--shadow-sm); }
+  .search::placeholder { color: var(--muted); }
+
+  /* Device cards */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 22px; }
+  .card { display: flex; flex-direction: column; background: var(--paper); border: var(--line) solid var(--ink); box-shadow: var(--shadow); min-width: 0; }
+  .card-head {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: var(--line) solid var(--ink); color: var(--on-accent);
+    font: 700 12px/1.2 var(--mono); letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .card.is-blocked .card-head { background: repeating-linear-gradient(-45deg, var(--red) 0 12px, #111 12px 24px); }
+  .card.is-blocked .card-head span:first-child { background: var(--paper); color: var(--text); border: 2px solid #111; padding: 2px 6px; }
+  .card.is-offline { box-shadow: var(--shadow-sm); }
+  .card.is-offline .card-head { background: var(--grey); color: var(--text); }
+  .card.is-offline .card-body { opacity: 0.7; }
+  .state-dot { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .state-dot::before { content: ""; width: 10px; height: 10px; border: 2px solid #111; background: #fff; }
+  .state-dot.on::before { background: #1FCB6B; }
+  .card.is-blocked .state-dot { background: var(--paper); color: var(--text); padding: 2px 6px; border: 2px solid #111; }
+  .card-body { padding: 14px 14px 10px; display: grid; gap: 10px; flex: 1; align-content: start; }
+  .name-row { display: flex; gap: 10px; align-items: flex-start; justify-content: space-between; }
+  .name-row h3 { margin: 0; font: 400 22px/1.1 var(--display); text-transform: uppercase; overflow-wrap: anywhere; }
+  .sub { margin: -6px 0 0; font: 700 12px/1.3 var(--mono); color: var(--muted); }
+  .facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; font-size: 13px; }
+  .facts dt { color: var(--muted); font-weight: 700; }
+  .facts dd { margin: 0; overflow-wrap: anywhere; }
+  .badges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .badge { padding: 3px 7px; border: 2px solid var(--ink); font: 700 11px/1.2 var(--mono); letter-spacing: 0.05em; text-transform: uppercase; color: var(--on-accent); }
+  .badge.plain { background: var(--paper); color: var(--text); }
+  .live { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border: 2px solid var(--ink); background: var(--bg); }
+  .meter { display: flex; align-items: baseline; gap: 4px; font: 700 15px/1 var(--mono); white-space: nowrap; }
+  .meter small { font-size: 11px; color: var(--muted); }
+  .signal { display: inline-flex; align-items: flex-end; gap: 3px; height: 18px; margin-left: auto; }
+  .signal i { width: 6px; border: 2px solid var(--ink); background: transparent; }
+  .signal i:nth-child(1) { height: 7px; } .signal i:nth-child(2) { height: 10px; }
+  .signal i:nth-child(3) { height: 14px; } .signal i:nth-child(4) { height: 18px; }
+  .signal i.on { background: var(--ink); }
+  .rssi { font: 700 12px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+  .live-note { margin: 0; font: 500 12px/1.4 var(--mono); color: var(--muted); }
+  .card-actions { display: flex; gap: 10px; padding: 12px 14px 14px; border-top: 2px dashed var(--ink); }
+  .card-actions .btn { flex: 1; }
+  .protected { display: flex; align-items: center; gap: 8px; margin: 0; font: 700 12px/1.35 var(--mono); }
+  .protected svg { width: 18px; height: 18px; flex: none; }
+
+  .empty { grid-column: 1 / -1; padding: 28px; text-align: center; font: 700 15px/1.4 var(--mono); }
+  .skeleton { height: 250px; background: repeating-linear-gradient(-45deg, var(--paper) 0 14px, var(--bg) 14px 28px); }
+
+  footer.page-foot { margin-top: 36px; display: flex; flex-wrap: wrap; gap: 10px 22px; justify-content: space-between; font: 700 12px/1.5 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+
+  /* Dialogs */
+  dialog { padding: 0; width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; background: var(--paper); color: var(--text); border: var(--line) solid var(--ink); box-shadow: 10px 10px 0 var(--ink); }
+  dialog::backdrop { background: var(--scrim); }
+  .dlg-head { padding: 14px 18px; border-bottom: var(--line) solid var(--ink); color: var(--on-accent); }
+  .dlg-head h2 { margin: 0; font: 400 22px/1.1 var(--display); text-transform: uppercase; overflow-wrap: anywhere; }
+  .dlg-body { padding: 18px; display: grid; gap: 14px; }
+  .dlg-body p { margin: 0; }
+  .dlg-foot { display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; padding: 0 18px 18px; }
+  .dlg-foot .spacer { flex: 1; }
+  label.field { display: grid; gap: 6px; font: 700 12px/1.2 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
+  label.field input { min-height: 44px; padding: 8px 12px; border: var(--line) solid var(--ink); background: var(--paper); font: 500 16px/1.2 var(--body); text-transform: none; letter-spacing: 0; }
+  .note { padding: 10px 12px; border: 2px dashed var(--ink); font: 500 13px/1.45 var(--mono); color: var(--muted); }
+  fieldset.rate { margin: 0; padding: 0; border: 0; display: grid; gap: 8px; }
+  fieldset.rate legend { padding: 0; margin-bottom: 8px; font: 700 12px/1.2 var(--mono); text-transform: uppercase; letter-spacing: 0.08em; }
+  .presets { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .presets .chip { min-width: 52px; }
+  .presets input { width: 96px; min-height: 40px; padding: 6px 10px; border: 2px solid var(--ink); background: var(--paper); font: 700 14px/1 var(--mono); }
+  .unit { font: 700 12px/1 var(--mono); color: var(--muted); }
+
+  /* Toasts */
+  .toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 10px; z-index: 50; max-width: min(380px, calc(100vw - 32px)); }
+  .toast { padding: 12px 14px; border: var(--line) solid var(--ink); box-shadow: var(--shadow-sm); font-weight: 700; color: var(--on-accent); background: var(--mint); }
+  .toast.bad { background: var(--red); }
+
+  @media (max-width: 900px) {
+    .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 600px) {
+    .wrap { padding: 18px 16px 48px; }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .stats .stat:last-child { grid-column: 1 / -1; }
+    .grid { grid-template-columns: minmax(0, 1fr); }
+    .search { flex: 1 1 100%; }
+    .router-card { flex-basis: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="masthead">
+    <div class="title-block">
+      <p class="eyebrow">Home network · 2 floors · 3 Wi-Fi radios</p>
+      <h1>Who's on<br>the <span class="hl">Wi-Fi?</span></h1>
+    </div>
+    <section class="router-card box" aria-label="Main router">
+      <div class="router-top">
+        <div>
+          <div class="router-name" id="r-name">Router</div>
+          <div class="router-sub" id="r-sub">GTPL fibre · 192.168.1.1</div>
+        </div>
+        <span class="net-pill" id="r-net">…</span>
+      </div>
+      <dl class="router-facts">
+        <div><dt>Uptime</dt><dd id="r-up">—</dd></div>
+        <div><dt>CPU</dt><dd id="r-cpu">—</dd></div>
+        <div><dt>Memory</dt><dd id="r-mem">—</dd></div>
+      </dl>
+      <div class="router-actions">
+        <button class="btn btn-main" id="refresh" type="button">Refresh</button>
+        <button class="btn" id="theme" type="button" aria-label="Switch colour theme">Theme</button>
+      </div>
+    </section>
+  </header>
+
+  <div class="banner box" id="banner" role="status">
+    <p id="banner-text"></p>
+    <button class="btn" id="banner-btn" type="button"></button>
+  </div>
+
+  <section class="stats" aria-label="Summary">
+    <div class="stat c-yellow"><b id="s-online">–</b><span>Online now</span></div>
+    <div class="stat c-blue"><b id="s-down">–</b><span>Downstairs Wi-Fi</span></div>
+    <div class="stat c-pink"><b id="s-up">–</b><span>Upstairs / wired</span></div>
+    <div class="stat c-red"><b id="s-blocked">–</b><span>Blocked</span></div>
+    <div class="stat c-orange"><b id="s-limited">–</b><span>Speed-limited</span></div>
+  </section>
+
+  <div class="toolbar">
+    <div class="chips" id="chips" role="group" aria-label="Filter devices"></div>
+    <label class="sr" for="q">Search devices</label>
+    <input class="search" id="q" type="search" placeholder="Search name, IP, MAC" autocomplete="off">
+  </div>
+
+  <main class="grid" id="grid" aria-live="polite">
+    <div class="card skeleton"></div><div class="card skeleton"></div><div class="card skeleton"></div>
+  </main>
+
+  <footer class="page-foot">
+    <span id="updated">Talking to the router…</span>
+    <span>Can only block, unblock, limit and unlimit. Nothing else on the router is reachable.</span>
+  </footer>
+</div>
+
+<dialog id="dlg-confirm" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <div class="dlg-head" id="confirm-head"><h2 id="confirm-title"></h2></div>
+    <div class="dlg-body"><p id="confirm-text"></p></div>
+    <div class="dlg-foot">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn" id="confirm-ok" value="ok"></button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-limit" aria-labelledby="limit-title">
+  <form method="dialog" id="limit-form">
+    <div class="dlg-head c-orange"><h2 id="limit-title">Limit speed</h2></div>
+    <div class="dlg-body">
+      <fieldset class="rate" data-dir="down">
+        <legend>Download (to the device)</legend>
+        <div class="presets"></div>
+      </fieldset>
+      <fieldset class="rate" data-dir="up">
+        <legend>Upload (from the device)</legend>
+        <div class="presets"></div>
+      </fieldset>
+      <p class="note" id="limit-note"></p>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn btn-go" id="limit-remove" type="button">Remove limit</button>
+      <span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn btn-main" id="limit-apply" type="button">Apply limit</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-rename" aria-labelledby="rename-title">
+  <form method="dialog" id="rename-form">
+    <div class="dlg-head c-lilac"><h2 id="rename-title">Name this device</h2></div>
+    <div class="dlg-body">
+      <label class="field">Name<input id="rename-input" maxlength="40" autocomplete="off"></label>
+      <p class="note" id="rename-note"></p>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" id="rename-reset" type="button">Use router name</button>
+      <span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn btn-main" id="rename-save" type="submit" value="save">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-login" aria-labelledby="login-title">
+  <form method="dialog" id="login-form">
+    <div class="dlg-head c-yellow"><h2 id="login-title">Log in to the router</h2></div>
+    <div class="dlg-body">
+      <p>The router logs computers out when they go quiet. Log in here and the panel keeps you logged in while it runs.</p>
+      <label class="field">Username<input id="login-user" autocomplete="username" required></label>
+      <label class="field">Password<input id="login-pass" type="password" autocomplete="current-password" required></label>
+      <p class="note">Sent only to your router at 192.168.1.1. The panel keeps it in memory to log back in, and never writes it to disk. You can also log in at 192.168.1.1 in any browser on this computer.</p>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" value="cancel" formnovalidate>Later</button>
+      <button class="btn btn-main" id="login-go" type="submit" value="login">Log in</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-pin" aria-labelledby="pin-title">
+  <form method="dialog" id="pin-form">
+    <div class="dlg-head c-lilac"><h2 id="pin-title">Enter the panel PIN</h2></div>
+    <div class="dlg-body">
+      <label class="field">PIN<input id="pin-input" inputmode="numeric" autocomplete="off" required></label>
+      <p class="note">This is the PIN set when the panel was started with --lan.</p>
+    </div>
+    <div class="dlg-foot"><button class="btn btn-main" type="submit" value="pin">Unlock</button></div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script>
+(() => {
+  const $ = (sel, el = document) => el.querySelector(sel);
+  const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) { /* storage unavailable */ } },
+  };
+
+  const WHERE = {
+    'ground-5': { label: 'Downstairs · 5 GHz', cls: 'c-blue', order: 0 },
+    'ground-24': { label: 'Downstairs · 2.4 GHz', cls: 'c-mint', order: 1 },
+    'upstairs': { label: 'Upstairs or wired', cls: 'c-pink', order: 2 },
+    'ap': { label: 'TP-Link access point', cls: 'c-yellow', order: 3 },
+  };
+  const FILTERS = [
+    ['all', 'All', () => true],
+    ['ground-5', 'Downstairs 5G', (d) => d.where === 'ground-5'],
+    ['ground-24', 'Downstairs 2.4G', (d) => d.where === 'ground-24'],
+    ['upstairs', 'Upstairs / wired', (d) => d.where === 'upstairs'],
+    ['blocked', 'Blocked', (d) => d.blocked],
+    ['limited', 'Limited', (d) => d.limit.down || d.limit.up],
+  ];
+  const PRESETS = [0, 0.5, 1, 2, 5, 10];
+  const POLL_MS = 10000;
+  const LOCK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="4" y="10" width="16" height="11"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
+  const PEN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13 7l4 4"/></svg>';
+
+  let state = null;
+  let filter = store.get('panelFilter') || 'all';
+  let query = '';
+  let lastOk = 0;
+  let pin = store.get('panelPin') || '';
+  let current = null; // device a dialog is acting on
+  let loginDismissed = false; // stop re-opening the login dialog on every poll after "Later"
+
+  // --- API ---
+  async function api(path, body) {
+    const headers = { 'X-Panel': '1' };
+    if (pin) headers['X-Panel-Pin'] = pin;
+    const opts = { headers };
+    if (body) { opts.method = 'POST'; headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+    let res;
+    try { res = await fetch(path, opts); } catch (e) {
+      throw Object.assign(new Error('The panel server is not running. Start it with: python3 server.py'), { kind: 'offline' });
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) throw Object.assign(new Error('The router logged this computer out.'), { kind: 'login' });
+    if (res.status === 403 && data.error === 'pin') throw Object.assign(new Error('PIN needed'), { kind: 'pin' });
+    if (!res.ok) throw new Error(data.error || 'Request failed (' + res.status + ')');
+    return data;
+  }
+
+  async function load() {
+    try {
+      state = await api('/api/state');
+      lastOk = Date.now();
+      banner(null);
+      render();
+    } catch (e) {
+      if (e.kind === 'login') { banner('login'); if (!loginDismissed && !anyDialogOpen()) openLogin(); }
+      else if (e.kind === 'pin') openPin();
+      else banner('error', e.message);
+      if (!state) renderEmpty(e.kind === 'login' ? 'Log in to the router to see devices.' : e.message);
+    }
+  }
+
+  // --- Formatting ---
+  const kbps = (v) => v == null ? '—' : v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1) + ' Mbps' : v + ' kbps';
+  const limitText = (kb) => kb >= 1000 ? +(kb / 1000).toFixed(2) + ' Mbps' : kb + ' kbps';
+  function duration(sec) {
+    if (sec == null) return '—';
+    const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+    return d ? d + 'd ' + h + 'h' : h ? h + 'h ' + m + 'm' : m + 'm';
+  }
+  const bars = (rssi) => rssi == null ? 0 : rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
+  const nameOf = (d) => d.nickname || d.hostname || 'Unknown device';
+
+  // --- Rendering ---
+  function render() {
+    renderRouter();
+    const devices = [...state.devices].sort((a, b) =>
+      (b.online - a.online) || (WHERE[a.where].order - WHERE[b.where].order) || nameOf(a).localeCompare(nameOf(b)));
+    const online = devices.filter((d) => d.online);
+    $('#s-online').textContent = online.length;
+    $('#s-down').textContent = online.filter((d) => d.where.startsWith('ground')).length;
+    $('#s-up').textContent = online.filter((d) => d.where === 'upstairs').length;
+    $('#s-blocked').textContent = devices.filter((d) => d.blocked).length;
+    $('#s-limited').textContent = devices.filter((d) => d.limit.down || d.limit.up).length;
+
+    $('#chips').innerHTML = FILTERS.map(([key, label, fn]) =>
+      `<button class="chip" type="button" data-filter="${key}" aria-pressed="${filter === key}">${esc(label)}<em>${devices.filter(fn).length}</em></button>`).join('');
+
+    const test = (FILTERS.find((f) => f[0] === filter) || FILTERS[0])[2];
+    const q = query.trim().toLowerCase();
+    const shown = devices.filter(test).filter((d) => !q ||
+      [nameOf(d), d.hostname, d.ip, d.mac].some((v) => v && v.toLowerCase().includes(q)));
+    $('#grid').innerHTML = shown.length ? shown.map(card).join('') : `<div class="empty box">No devices match.</div>`;
+  }
+
+  function renderRouter() {
+    const r = state.router || {};
+    $('#r-name').textContent = 'OVT ' + (r.model || 'router');
+    $('#r-sub').textContent = 'GTPL fibre · ' + (r.wan && r.wan.protocol || 'WAN') + ' · fw ' + (r.firmware || '?');
+    const up = r.wan && /^up/i.test(r.wan.status || '');
+    const pill = $('#r-net');
+    pill.textContent = up ? 'Internet up' : 'Internet down';
+    pill.className = 'net-pill ' + (up ? 'up' : 'down');
+    $('#r-up').textContent = (r.uptime || '—').replace(/ days?,/, 'd').replace(/ min/, 'm');
+    $('#r-cpu').textContent = r.cpu || '—';
+    $('#r-mem').textContent = r.memory || '—';
+  }
+
+  function card(d) {
+    const w = WHERE[d.where];
+    const limited = d.limit.down || d.limit.up;
+    const badges = [];
+    if (d.blocked) badges.push('<span class="badge c-red">Blocked</span>');
+    if (d.limit.down) badges.push(`<span class="badge c-orange">↓ max ${esc(limitText(d.limit.down))}</span>`);
+    if (d.limit.up) badges.push(`<span class="badge c-orange">↑ max ${esc(limitText(d.limit.up))}</span>`);
+    if (d.privateMac) badges.push('<span class="badge plain" title="The phone uses a randomised MAC address for this Wi-Fi. If it changes, blocks stop matching.">Private MAC</span>');
+    if (d.wifi && d.wifi.uptime != null) badges.push(`<span class="badge plain">On for ${esc(duration(d.wifi.uptime))}</span>`);
+
+    let live;
+    if (d.wifi) {
+      const n = bars(d.wifi.rssi);
+      live = `<div class="live">
+        <span class="meter" title="Download speed right now">↓ ${esc(kbps(d.wifi.downKbps))}</span>
+        <span class="meter" title="Upload speed right now">↑ ${esc(kbps(d.wifi.upKbps))}</span>
+        <span class="signal" title="Signal ${esc(d.wifi.rssi)} dBm" aria-label="Signal ${n} of 4">${[1, 2, 3, 4].map((i) => `<i class="${i <= n ? 'on' : ''}"></i>`).join('')}</span>
+        <span class="rssi">${esc(d.wifi.rssi)} dBm</span>
+      </div>`;
+    } else if (d.where === 'upstairs' && d.online) {
+      live = '<p class="live-note">Connected through the TP-Link upstairs or by cable. Live speed only shows for the main router\'s Wi-Fi.</p>';
+    } else {
+      live = d.online ? '' : '<p class="live-note">Not seen recently. It still has an address lease from the router.</p>';
+    }
+
+    const actions = d.protected
+      ? `<p class="protected">${LOCK_ICON}<span>${esc(d.protected)}</span></p>`
+      : `<button class="btn ${d.blocked ? 'btn-go' : 'btn-stop'}" type="button" data-act="${d.blocked ? 'unblock' : 'block'}">${d.blocked ? 'Unblock' : 'Block'}</button>
+         <button class="btn" type="button" data-act="limit" ${d.ip ? '' : 'disabled'}>${limited ? 'Edit limit' : 'Limit speed'}</button>`;
+
+    return `<article class="card ${d.blocked ? 'is-blocked' : ''} ${d.online ? '' : 'is-offline'}" data-mac="${esc(d.mac)}">
+      <div class="card-head ${w.cls}"><span>${esc(w.label)}</span><span class="state-dot ${d.online ? 'on' : ''}">${d.online ? 'Online' : 'Offline'}</span></div>
+      <div class="card-body">
+        <div class="name-row"><h3>${esc(nameOf(d))}</h3><button class="icon-btn" type="button" data-act="rename" aria-label="Rename ${esc(nameOf(d))}">${PEN_ICON}</button></div>
+        ${d.nickname && d.hostname ? `<p class="sub">${esc(d.hostname)}</p>` : ''}
+        <dl class="facts mono"><dt>IP</dt><dd>${esc(d.ip || '—')}</dd><dt>MAC</dt><dd>${esc(d.mac)}</dd></dl>
+        ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
+        ${live}
+      </div>
+      <div class="card-actions">${actions}</div>
+    </article>`;
+  }
+
+  function renderEmpty(msg) {
+    $('#grid').innerHTML = `<div class="empty box">${esc(msg)}</div>`;
+  }
+
+  function banner(kind, msg) {
+    const el = $('#banner');
+    if (!kind) { el.classList.remove('show'); return; }
+    $('#banner-text').textContent = kind === 'login'
+      ? 'The router logged this computer out, so the panel can’t read it right now.'
+      : msg;
+    const btn = $('#banner-btn');
+    btn.textContent = kind === 'login' ? 'Log in' : 'Try again';
+    btn.onclick = kind === 'login' ? openLogin : load;
+    el.classList.add('show');
+  }
+
+  function toast(msg, bad) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (bad ? ' bad' : '');
+    el.textContent = msg;
+    $('#toasts').appendChild(el);
+    setTimeout(() => el.remove(), bad ? 7000 : 4000);
+  }
+
+  const anyDialogOpen = () => [...document.querySelectorAll('dialog')].some((d) => d.open);
+
+  // --- Actions ---
+  async function run(button, path, body, after) {
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Working…';
+    try {
+      const res = await api(path, body);
+      if (after) after();
+      if (res.message) toast(res.message);
+      await load();
+      return true;
+    } catch (e) {
+      if (e.kind === 'login') { banner('login'); openLogin(); }
+      else if (e.kind === 'pin') openPin();
+      else toast(e.message, true);
+      return false;
+    } finally {
+      button.disabled = false;
+      button.textContent = label;
+    }
+  }
+
+  function openConfirm(d, act) {
+    current = d;
+    const block = act === 'block';
+    $('#confirm-head').className = 'dlg-head ' + (block ? 'c-red' : 'c-mint');
+    $('#confirm-title').textContent = (block ? 'Block ' : 'Unblock ') + nameOf(d) + '?';
+    $('#confirm-text').textContent = block
+      ? 'It loses internet on both floors until you unblock it. It stays connected to the Wi-Fi.'
+      : 'Internet access comes back right away.';
+    const ok = $('#confirm-ok');
+    ok.textContent = block ? 'Block it' : 'Unblock';
+    ok.className = 'btn ' + (block ? 'btn-stop' : 'btn-go');
+    ok.dataset.act = act;
+    $('#dlg-confirm').showModal();
+  }
+
+  $('#dlg-confirm').addEventListener('close', () => {
+    const dlg = $('#dlg-confirm');
+    if (dlg.returnValue !== 'ok' || !current) return;
+    const act = $('#confirm-ok').dataset.act;
+    const btn = document.querySelector(`.card[data-mac="${CSS.escape(current.mac)}"] [data-act="${act}"]`) || $('#confirm-ok');
+    run(btn, '/api/' + act, { mac: current.mac });
+  });
+
+  // Limit dialog
+  const limitChoice = { down: 0, up: 0 };
+  function buildPresets(dir) {
+    const box = $(`fieldset[data-dir="${dir}"] .presets`);
+    box.innerHTML = PRESETS.map((v) =>
+      `<button class="chip" type="button" data-rate="${v}">${v ? v + '' : 'Off'}</button>`).join('') +
+      `<input type="number" min="0.256" step="0.1" placeholder="Custom" aria-label="Custom ${dir === 'down' ? 'download' : 'upload'} limit in Mbps"><span class="unit">Mbps</span>`;
+    box.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-rate]');
+      if (!b) return;
+      setLimit(dir, Number(b.dataset.rate));
+      box.querySelector('input').value = '';
+    });
+    box.querySelector('input').addEventListener('input', (e) => setLimit(dir, Number(e.target.value) || 0, true));
+  }
+  function setLimit(dir, mbps, fromInput) {
+    limitChoice[dir] = mbps;
+    const box = $(`fieldset[data-dir="${dir}"] .presets`);
+    box.querySelectorAll('[data-rate]').forEach((b) => b.setAttribute('aria-pressed', String(!fromInput && Number(b.dataset.rate) === mbps)));
+  }
+  buildPresets('down');
+  buildPresets('up');
+
+  function openLimit(d) {
+    current = d;
+    $('#limit-title').textContent = 'Limit ' + nameOf(d);
+    for (const dir of ['down', 'up']) {
+      const mbps = d.limit[dir] ? d.limit[dir] / 1000 : 0;
+      const isPreset = PRESETS.includes(mbps);
+      setLimit(dir, mbps, !isPreset);
+      $(`fieldset[data-dir="${dir}"] input`).value = isPreset ? '' : mbps;
+    }
+    $('#limit-note').textContent = `Applies to ${d.ip} on both floors. If the router gives this device a different IP later, the limit stays on the old IP. Minimum ${state.minLimitKbps} kbps.`;
+    $('#limit-remove').hidden = !(d.limit.down || d.limit.up);
+    $('#dlg-limit').showModal();
+  }
+  $('#limit-apply').addEventListener('click', async (e) => {
+    const down = Math.round(limitChoice.down * 1000), up = Math.round(limitChoice.up * 1000);
+    if (!down && !up) { toast('Pick a download or upload limit, or use Remove limit.', true); return; }
+    const min = state.minLimitKbps;
+    if ((down && down < min) || (up && up < min)) { toast(`Limits must be at least ${min} kbps (0.256 Mbps).`, true); return; }
+    if (await run(e.currentTarget, '/api/limit', { mac: current.mac, down, up })) $('#dlg-limit').close();
+  });
+  $('#limit-remove').addEventListener('click', async (e) => {
+    if (await run(e.currentTarget, '/api/unlimit', { mac: current.mac })) $('#dlg-limit').close();
+  });
+
+  // Rename dialog
+  function openRename(d) {
+    current = d;
+    $('#rename-input').value = d.nickname || d.hostname || '';
+    $('#rename-note').textContent = `The router calls it “${d.hostname || 'no name'}” · ${d.mac}. Names are saved on this computer only.`;
+    $('#dlg-rename').showModal();
+  }
+  $('#rename-form').addEventListener('submit', async (e) => {
+    if (e.submitter && e.submitter.value === 'cancel') return;
+    e.preventDefault();
+    const name = $('#rename-input').value.trim();
+    if (await run($('#rename-save'), '/api/name', { mac: current.mac, name: name === current.hostname ? '' : name })) $('#dlg-rename').close();
+  });
+  $('#rename-reset').addEventListener('click', async (e) => {
+    if (await run(e.currentTarget, '/api/name', { mac: current.mac, name: '' })) $('#dlg-rename').close();
+  });
+
+  // Login and PIN
+  function openLogin() { if (!$('#dlg-login').open) { closeAll(); $('#dlg-login').showModal(); } }
+  function openPin() { if (!$('#dlg-pin').open) { closeAll(); $('#dlg-pin').showModal(); } }
+  function closeAll() { document.querySelectorAll('dialog[open]').forEach((d) => d.close()); }
+  $('#login-form').addEventListener('submit', async (e) => {
+    if (e.submitter && e.submitter.value === 'cancel') { loginDismissed = true; return; }
+    e.preventDefault();
+    const ok = await run($('#login-go'), '/api/login', { username: $('#login-user').value, password: $('#login-pass').value });
+    $('#login-pass').value = '';
+    if (ok) { $('#dlg-login').close(); toast('Logged in to the router'); }
+  });
+  $('#pin-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    pin = $('#pin-input').value.trim();
+    store.set('panelPin', pin);
+    $('#dlg-pin').close();
+    load();
+  });
+
+  // --- Wiring ---
+  $('#grid').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-act]');
+    if (!btn || !state) return;
+    const d = state.devices.find((x) => x.mac === btn.closest('.card').dataset.mac);
+    if (!d) return;
+    const act = btn.dataset.act;
+    if (act === 'block' || act === 'unblock') openConfirm(d, act);
+    else if (act === 'limit') openLimit(d);
+    else if (act === 'rename') openRename(d);
+  });
+  $('#chips').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-filter]');
+    if (!b) return;
+    filter = b.dataset.filter;
+    store.set('panelFilter', filter);
+    if (state) render();
+  });
+  $('#q').addEventListener('input', (e) => { query = e.target.value; if (state) render(); });
+  $('#refresh').addEventListener('click', (e) => run(e.currentTarget, '/api/state').catch(() => {}));
+
+  const savedTheme = store.get('panelTheme');
+  if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+  $('#theme').addEventListener('click', () => {
+    const dark = document.documentElement.dataset.theme
+      ? document.documentElement.dataset.theme === 'dark'
+      : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+    store.set('panelTheme', document.documentElement.dataset.theme);
+  });
+
+  setInterval(() => {
+    $('#updated').textContent = lastOk
+      ? 'Updated ' + Math.round((Date.now() - lastOk) / 1000) + 's ago · refreshes every ' + POLL_MS / 1000 + 's'
+      : 'Talking to the router…';
+  }, 1000);
+  setInterval(() => { if (!document.hidden) load(); }, POLL_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+  load();
+})();
+</script>
+</body>
+</html>
