@@ -707,12 +707,14 @@
     $('#limit-remove').hidden = !(d.limit.down || d.limit.up);
     $('#dlg-limit').showModal();
   }
-  $('#limit-apply').addEventListener('click', async (e) => {
+  // Submit (the Apply button, or Enter in the custom box) applies the limit.
+  $('#limit-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
     const down = Math.round(limitChoice.down * 1000), up = Math.round(limitChoice.up * 1000);
     if (!down && !up) { toast('Pick a download or upload limit, or use Remove limit.', true); return; }
     const min = data.devices.minLimitKbps;
     if ((down && down < min) || (up && up < min)) { toast(`Limits must be at least ${min} kbps.`, true); return; }
-    if (await run(e.currentTarget, '/api/limit', { mac: current.mac, down, up })) $('#dlg-limit').close();
+    if (await run($('#limit-apply'), '/api/limit', { mac: current.mac, down, up })) $('#dlg-limit').close();
   });
   $('#limit-remove').addEventListener('click', async (e) => {
     if (await run(e.currentTarget, '/api/unlimit', { mac: current.mac })) $('#dlg-limit').close();
@@ -725,7 +727,6 @@
     $('#dlg-rename').showModal();
   }
   $('#rename-form').addEventListener('submit', async (e) => {
-    if (e.submitter && e.submitter.value === 'cancel') return;
     e.preventDefault();
     const name = $('#rename-input').value.trim();
     if (await run($('#rename-save'), '/api/name', { mac: current.mac, name: name === current.hostname ? '' : name })) $('#dlg-rename').close();
@@ -738,8 +739,16 @@
   function openLogin() { if (!$('#dlg-login').open) { closeAll(); $('#dlg-login').showModal(); } }
   function openPin() { if (!$('#dlg-pin').open) { closeAll(); $('#dlg-pin').showModal(); } }
   function closeAll() { $$('dialog[open]').forEach((d) => d.close()); }
+  // Cancel / Later are plain buttons (not submit), so pressing Enter in a field
+  // always triggers the dialog's main action instead of the first button in the footer.
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-close]');
+    if (!b) return;
+    if (b.id === 'login-later') loginDismissed = true;
+    b.closest('dialog').close('cancel');
+  });
+  $('#dlg-login').addEventListener('cancel', () => { loginDismissed = true; });  // Escape key
   $('#login-form').addEventListener('submit', async (e) => {
-    if (e.submitter && e.submitter.value === 'cancel') { loginDismissed = true; return; }
     e.preventDefault();
     const ok = await run($('#login-go'), '/api/login', { username: $('#login-user').value, password: $('#login-pass').value });
     $('#login-pass').value = '';

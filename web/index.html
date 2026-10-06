@@ -94,7 +94,7 @@
     <div class="dlg-head" id="confirm-head"><h2 id="confirm-title"></h2></div>
     <div class="dlg-body"><p id="confirm-text"></p></div>
     <div class="dlg-foot">
-      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn" type="button" data-close>Cancel</button>
       <button class="btn" id="confirm-ok" value="ok"></button>
     </div>
   </form>
@@ -117,8 +117,8 @@
     <div class="dlg-foot">
       <button class="btn go" id="limit-remove" type="button">Remove limit</button>
       <span class="spacer"></span>
-      <button class="btn" value="cancel" formnovalidate>Cancel</button>
-      <button class="btn main" id="limit-apply" type="button">Apply limit</button>
+      <button class="btn" type="button" data-close>Cancel</button>
+      <button class="btn main" id="limit-apply" type="submit">Apply limit</button>
     </div>
   </form>
 </dialog>
@@ -133,7 +133,7 @@
     <div class="dlg-foot">
       <button class="btn" id="rename-reset" type="button">Use router name</button>
       <span class="spacer"></span>
-      <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      <button class="btn" type="button" data-close>Cancel</button>
       <button class="btn main" id="rename-save" type="submit" value="save">Save</button>
     </div>
   </form>
@@ -149,7 +149,7 @@
       <p class="note">Sent only to your router. The panel keeps it in memory to log back in, and never writes it to disk. You can also log in on the router's own page in any browser on this computer.</p>
     </div>
     <div class="dlg-foot">
-      <button class="btn" value="cancel" formnovalidate>Later</button>
+      <button class="btn" type="button" data-close id="login-later">Later</button>
       <button class="btn main" id="login-go" type="submit" value="login">Log in</button>
     </div>
   </form>
