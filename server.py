@@ -153,6 +153,44 @@ def _address_kind(ip):
     return 'public'
 
 
+def _fold_old_addresses(devices):
+    """Tidy the device list.
+
+    Phones with private MACs switch to a new random MAC now and then. The router then
+    hands out a new lease and keeps the old one (same host name, old MAC) for up to a day,
+    so one phone shows up several times. Fold those offline entries into the device that
+    is online under that name. Entries with no name, no lease and no recent traffic are
+    leftovers from the ARP table; mark them stale so the page can tuck them away.
+    """
+    by_name = {}
+    for d in devices:
+        if d['hostname']:
+            by_name.setdefault(d['hostname'], []).append(d)
+    folded = set()
+    for group in by_name.values():
+        if len(group) < 2:
+            continue
+        online = [d for d in group if d['online']]
+        keep = online or [max(group, key=lambda d: d['lease'] or 0)]
+        keep_ids = {id(d) for d in keep}
+        primary = max(keep, key=lambda d: (bool(d['wifi']), d['lease'] or 0))
+        for d in group:
+            # Never hide a device that is online (it may be a second phone of the same model),
+            # or one with a block, limit or nickname (the user needs its card).
+            if id(d) in keep_ids or d['blocked'] or d['limit']['down'] or d['limit']['up'] or d['nickname']:
+                continue
+            primary.setdefault('olderAddresses', []).append({'ip': d['ip'], 'mac': d['mac']})
+            folded.add(d['mac'])
+    out = []
+    for d in devices:
+        if d['mac'] in folded:
+            continue
+        d.setdefault('olderAddresses', [])
+        d['stale'] = not (d['online'] or d['lease'] or d['hostname'] or d['nickname'] or d['blocked'])
+        out.append(d)
+    return out
+
+
 # --- Panel state and actions ---
 
 class Panel:
@@ -282,7 +320,9 @@ class Panel:
                 'hostname': self.hostnames.get(ip, (None,))[0] if ip else None,
                 'nickname': self.nicknames.get(mac),
                 'iface': radio or clients['ports'].get(mac),
-                'online': bool(wifi) or mac in clients['arp'],
+                # Online = associated to a radio now, or seen in the bridge table (frames in the last
+                # few minutes). ARP alone isn't enough: entries outlive the device by a long time.
+                'online': bool(wifi) or mac in clients['ports'],
                 'privateMac': bool(int(mac[:2], 16) & 2),
                 'lease': lease.get('lease'),
                 'wifi': wifi,
@@ -293,7 +333,7 @@ class Panel:
                 },
                 'protected': self._protected(mac, ip, client_ip, protected_macs),
             })
-        return devices
+        return _fold_old_addresses(devices)
 
     def state(self, client_ip):
         with self.lock:  # read the cache timestamp atomically with the fetch (login() can clear the cache)

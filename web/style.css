@@ -325,6 +325,14 @@ button { cursor: pointer; }
 }
 .protected svg { width: 20px; height: 20px; flex: none; }
 
+.stale { display: grid; gap: 12px; justify-items: start; margin-top: 32px; }
+.stale-list {
+  display: grid; gap: 0; width: 100%; max-width: 560px; overflow: hidden;
+  background: var(--card); border: var(--b) solid var(--ink); border-radius: var(--r-sm);
+}
+.stale-row { display: flex; justify-content: space-between; gap: 16px; padding: 9px 14px; font-size: 14px; }
+.stale-row + .stale-row { border-top: 2px dashed var(--ink); }
+
 /* ---------- Gauge (fibre) ---------- */
 .gauge-wrap { position: relative; padding: 10px 0 0; }
 .gauge { display: flex; height: 30px; overflow: hidden; border: var(--b) solid var(--ink); border-radius: 999px; }

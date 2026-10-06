@@ -23,8 +23,8 @@
     },
     'device.online': {
       title: 'Online and offline',
-      what: 'A device counts as online if it is associated to a radio right now, or if the router has it in its ARP cache (the IPv4-to-MAC table it uses to deliver packets on the LAN).',
-      change: 'ARP entries linger a few minutes after a device leaves, so one that just walked out can still read online. An offline device with a lease is one the router gave an address to but has not heard from lately.',
+      what: 'A device counts as online if it is associated to one of the router\'s radios right now, or if the router\'s bridge table has seen frames from its MAC in the last few minutes. The ARP cache (IPv4-to-MAC table) is not used for this: its entries outlive the device by a long time.',
+      change: 'A phone that just left still reads online for up to about 5 minutes, until its bridge-table entry expires. When a phone switches to a new random MAC, its old lease is folded into its card as an "older address", and nameless leftovers go into the collapsed list at the bottom.',
       example: 'A lease of 86400 s means the address is reserved for 24 hours. The device tries to renew at half that (12 h) while it stays connected.',
       effect: READING,
     },

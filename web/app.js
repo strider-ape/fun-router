@@ -214,7 +214,9 @@
 
   function renderDevices(state) {
     renderHero(state.router);
-    const devices = [...state.devices].sort((a, b) => (b.online - a.online) || nameOf(a).localeCompare(nameOf(b)));
+    const devices = state.devices.filter((d) => !d.stale)
+      .sort((a, b) => (b.online - a.online) || nameOf(a).localeCompare(nameOf(b)));
+    renderStale(state.devices.filter((d) => d.stale));
     const online = devices.filter((d) => d.online);
     const onWifi = online.filter((d) => { const i = ifaceOf(d); return i && i.kind === 'wifi'; });
     $('#stats').innerHTML = [
@@ -242,6 +244,18 @@
     const shown = devices.filter(test).filter((d) => !q ||
       [nameOf(d), d.hostname, d.ip, d.mac].some((x) => x && x.toLowerCase().includes(q)));
     $('#grid').innerHTML = shown.length ? shown.map(deviceCard).join('') : '<div class="empty">No devices match.</div>';
+  }
+
+  // Nameless ARP leftovers: not shown as devices, but listed (collapsed) so nothing is hidden.
+  let staleOpen = false;
+  function renderStale(list) {
+    if (!list.length) { $('#stale').innerHTML = ''; return; }
+    $('#stale').innerHTML = `<section class="stale">
+      <button class="btn sm" type="button" data-stale aria-expanded="${staleOpen}">${staleOpen ? 'Hide' : 'Show'} ${list.length} old address${list.length === 1 ? '' : 'es'}</button>
+      <p class="hint">Addresses the router still remembers but hasn't seen traffic from recently, with no name or lease. Usually random MACs a phone has already replaced.</p>
+      ${staleOpen ? `<div class="stale-list">${list.map((d) =>
+        `<div class="stale-row"><span class="mono">${esc(d.ip || '—')}</span><span class="mono">${esc(d.mac)}</span></div>`).join('')}</div>` : ''}
+    </section>`;
   }
 
   function deviceCard(d) {
@@ -290,6 +304,7 @@
           <button class="chip sm" type="button" data-act="rename" aria-label="Rename ${esc(nameOf(d))}">✎ Rename</button>
         </div>
         ${d.nickname && d.hostname ? `<p class="hint">The router calls it ${esc(d.hostname)}.</p>` : ''}
+        ${d.olderAddresses && d.olderAddresses.length ? `<p class="hint">Also used ${d.olderAddresses.length} older address${d.olderAddresses.length === 1 ? '' : 'es'} (${d.olderAddresses.map((o) => esc(o.ip)).join(', ')}) — the phone switched to a new random MAC.</p>` : ''}
         ${tags.length ? `<div class="tags">${tags.join('')}</div>` : ''}
         ${live}
       </div>
@@ -745,6 +760,11 @@
     if (act === 'block' || act === 'unblock') openConfirm(d, act);
     else if (act === 'limit') openLimit(d);
     else if (act === 'rename') openRename(d);
+  });
+  $('#stale').addEventListener('click', (e) => {
+    if (!e.target.closest('[data-stale]')) return;
+    staleOpen = !staleOpen;
+    if (data.devices) renderStale(data.devices.devices.filter((d) => d.stale));
   });
   $('#chips').addEventListener('click', (e) => {
     const b = e.target.closest('[data-filter]');
