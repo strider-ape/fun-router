@@ -41,6 +41,8 @@
     <nav class="tabs" role="tablist" aria-label="Sections">
       <button class="tab" role="tab" id="tab-devices" data-tab="devices" aria-controls="view-devices">Devices</button>
       <button class="tab" role="tab" id="tab-usage" data-tab="usage" aria-controls="view-usage">Usage</button>
+      <button class="tab" role="tab" id="tab-activity" data-tab="activity" aria-controls="view-activity">Activity <span class="count" id="act-count" hidden></span></button>
+      <button class="tab" role="tab" id="tab-controls" data-tab="controls" aria-controls="view-controls">Controls</button>
       <button class="tab" role="tab" id="tab-internet" data-tab="internet" aria-controls="view-internet">Internet</button>
       <button class="tab" role="tab" id="tab-wifi" data-tab="wifi" aria-controls="view-wifi">Wi-Fi</button>
       <button class="tab" role="tab" id="tab-security" data-tab="security" aria-controls="view-security">Security <span class="count" id="sec-count" hidden></span></button>
@@ -71,6 +73,14 @@
       <div id="usage"><div class="skeleton"></div></div>
     </section>
 
+    <section id="view-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
+      <div class="cards" id="activity"><div class="skeleton"></div></div>
+    </section>
+
+    <section id="view-controls" role="tabpanel" aria-labelledby="tab-controls" hidden>
+      <div class="cards" id="controls"><div class="skeleton"></div></div>
+    </section>
+
     <section id="view-internet" role="tabpanel" aria-labelledby="tab-internet" hidden>
       <div class="cards" id="internet"><div class="skeleton"></div><div class="skeleton"></div></div>
     </section>
@@ -90,7 +100,7 @@
 
   <footer class="page-foot">
     <span id="updated">Talking to the router…</span>
-    <span>Changes it can make: block, unblock and speed limits. Everything else is read-only.</span>
+    <span>Changes it can make: blocks, limits, schedules, website blocks, IP pins, WPS off and Wi-Fi channel/power. Nothing else.</span>
   </footer>
 </div>
 
@@ -101,6 +111,17 @@
     <div class="dlg-foot">
       <button class="btn" type="button" data-close>Cancel</button>
       <button class="btn" id="confirm-ok" value="ok"></button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-ask" aria-labelledby="ask-title">
+  <form method="dialog" id="ask-form">
+    <div class="dlg-head" id="ask-head"><h2 id="ask-title"></h2></div>
+    <div class="dlg-body" id="ask-body"></div>
+    <div class="dlg-foot">
+      <button class="btn" type="button" data-close>Cancel</button>
+      <button class="btn main" id="ask-ok" type="submit">OK</button>
     </div>
   </form>
 </dialog>

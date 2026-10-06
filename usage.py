@@ -50,6 +50,10 @@ class UsageStore:
             CREATE TABLE IF NOT EXISTS optics (ts INTEGER NOT NULL, rx REAL, tx REAL);
             CREATE TABLE IF NOT EXISTS names (
                 mac TEXT PRIMARY KEY, name TEXT, ip TEXT, band TEXT, seen INTEGER);
+            CREATE TABLE IF NOT EXISTS events (
+                ts INTEGER NOT NULL, kind TEXT NOT NULL, mac TEXT, name TEXT, ip TEXT, detail TEXT);
+            CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+            CREATE TABLE IF NOT EXISTS known (mac TEXT PRIMARY KEY, first_seen INTEGER NOT NULL, name TEXT);
         ''')
         self.db.commit()
         self.last = {}           # scope -> (ts, down counter, up counter)
@@ -107,10 +111,32 @@ class UsageStore:
             rows.append((int(now), scope, secs, down, up, int(reset)))
         return secs
 
+    # --- Activity ---
+
+    def add_event(self, ts, kind, mac=None, name=None, ip=None, detail=None):
+        with self.lock:
+            self.db.execute('INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)', (int(ts), kind, mac, name, ip, detail))
+            self.db.commit()
+
+    def events(self, limit=200):
+        rows = self._rows('SELECT ts, kind, mac, name, ip, detail FROM events ORDER BY ts DESC, rowid DESC LIMIT ?', (limit,))
+        return [{'ts': ts, 'kind': kind, 'mac': mac, 'name': name, 'ip': ip, 'detail': detail}
+                for ts, kind, mac, name, ip, detail in rows]
+
+    def known(self):
+        """{mac: name} of every device the panel has ever seen."""
+        return dict(self._rows('SELECT mac, name FROM known'))
+
+    def remember(self, ts, mac, name):
+        with self.lock:
+            self.db.execute('INSERT INTO known VALUES (?, ?, ?) ON CONFLICT(mac) DO UPDATE SET '
+                            'name = COALESCE(excluded.name, known.name)', (mac, int(ts), name))
+            self.db.commit()
+
     def prune(self, now):
         cutoff = int(now - KEEP_DAYS * 86400)
         with self.lock:
-            for table in ('usage', 'coverage', 'optics'):
+            for table in ('usage', 'coverage', 'optics', 'events'):
                 self.db.execute('DELETE FROM %s WHERE ts < ?' % table, (cutoff,))
             self.db.commit()
 

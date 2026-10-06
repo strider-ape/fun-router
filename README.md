@@ -45,19 +45,43 @@ networks** only. On Linux with `ufw`, run `sudo ufw allow 8787/tcp`.
   (download, upload or both), usage over time, top devices, share by device, an hour-by-weekday
   heatmap, fun facts and fibre signal history. The router only counts since it last booted, so
   fun-router records the history itself into `usage.db` (local, git-ignored) while it runs.
+- **Activity** — a feed of devices joining, leaving and moving between radios and ports, new
+  devices (with an alert on any tab), internet drops and router restarts, plus the router's
+  own event log.
+- **Controls** — bedtime schedules, blocked websites, pinned IPs and the event-log switch.
 - **Internet** — the connection (PPPoE, CGNAT detection), IPv4/IPv6, DNS, the fibre
   (GPON) optical levels with a health gauge, data used, and LAN port speeds.
-- **Wi-Fi** — each radio's channel, width, standard, power, security and WPS, plus a
-  channel map of your networks against the neighbours around you.
-- **Security** — a read-only check-up that rates WPS, encryption, remote access,
-  UPnP, DMZ, port forwards and more against safe defaults.
+- **Wi-Fi** — each radio's channel, width, standard, power, security and WPS, a channel map
+  of your networks against the neighbours around you, and a one-tap channel suggestion.
+- **Security** — a check-up that rates WPS, encryption, 802.11w, remote access, UPnP, DMZ,
+  port forwards and more against safe defaults, with a fix button for WPS.
 - **Tools** — ping and traceroute, run from the router itself.
 
 ## What it can change
 
-Only **block**, **unblock**, **limit speed** and **remove a limit** on a device, plus
-running a ping/traceroute. Everything else is read-only: firmware, reset, the
-fibre/WAN setup, passwords and Wi-Fi settings are deliberately out of reach, and it
-refuses to block the router, the access point, or the computer running the panel.
+Every change is confirmed in a dialog that says what will happen, then read back from the
+router to make sure it stuck:
+
+- **Devices:** block / unblock, limit speed / remove a limit.
+- **Bedtime:** turn a device's internet off on a schedule (overnight ranges work too).
+- **Blocked websites:** block a domain for every device (the router stops resolving it).
+- **Pinned IPs:** a device always gets the same address.
+- **Wi-Fi:** channel, width and transmit power; turn WPS off.
+- **Event log:** switch the router's own log on or off (it stays on the router).
+- **Tools:** run ping / traceroute from the router.
+
+Out of reach on purpose: firmware, reboot/reset, backup/restore, the fibre/WAN setup,
+passwords, the Wi-Fi name, password and encryption (802.11w included), remote logging and
+every "Delete All". It refuses to block, limit or schedule the router, the access point,
+the computer running the panel, or the device you're viewing it on.
+
+## Tests
+
+```bash
+py -m unittest discover tests
+```
+
+They check every form fun-router can submit against what the router's own page sends,
+and that everything off the allow-list is refused.
 
 See `CLAUDE.md` for how the console works, the architecture, and what's still untested.

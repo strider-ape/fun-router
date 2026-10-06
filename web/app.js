@@ -8,7 +8,10 @@
   };
 
   const POLL_MS = 10000;
-  const TABS = ['devices', 'usage', 'internet', 'wifi', 'security', 'tools'];
+  const TABS = ['devices', 'usage', 'activity', 'controls', 'internet', 'wifi', 'security', 'tools'];
+  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  // Tabs with forms aren't redrawn by the 10 s poll, so a half-filled form isn't wiped.
+  const NO_AUTO_REFRESH = ['tools', 'controls', 'wifi'];
   const PRESETS = [0, 0.5, 1, 2, 5, 10];
   const BAND_COLOR = { '5': 'c-blue', '2.4': 'c-green' };
   const LOCK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
@@ -126,13 +129,15 @@
   const LOADERS = {
     devices: () => api('/api/state'),
     usage: () => api('/api/stats'),
+    activity: () => api('/api/activity'),
+    controls: () => api('/api/controls'),
     internet: () => api('/api/internet'),
     wifi: () => api('/api/wifi'),
     security: () => api('/api/security'),
     tools: async () => ({}),
   };
   const RENDERERS = {
-    devices: renderDevices, usage: renderUsage, internet: renderInternet, wifi: renderWifi,
+    devices: renderDevices, usage: renderUsage, activity: renderActivity, controls: renderControls, internet: renderInternet, wifi: renderWifi,
     security: renderSecurity, tools: renderTools,
   };
 
@@ -169,12 +174,14 @@
     $('#tab-security').hidden = !caps.includes('security');
     $('#tab-internet').hidden = !caps.includes('internet');
     $('#tab-usage').hidden = !caps.includes('usage');
+    $('#tab-activity').hidden = !caps.includes('usage');
+    $('#tab-controls').hidden = !['domains', 'schedules', 'pins', 'syslog'].some((c) => caps.includes(c));
     // A restored tab may belong to a capability this router lacks; fall back to Devices.
     if ($('#tab-' + tab).hidden) selectTab('devices');
   }
 
   function renderEmpty(name, msg) {
-    const host = { devices: '#grid', usage: '#usage', internet: '#internet', wifi: '#wifi', security: '#security', tools: '#tools' }[name];
+    const host = { devices: '#grid', usage: '#usage', activity: '#activity', controls: '#controls', internet: '#internet', wifi: '#wifi', security: '#security', tools: '#tools' }[name];
     $(host).innerHTML = `<div class="empty">${esc(msg)}</div>`;
   }
 
@@ -566,6 +573,344 @@
     tick();
   }
 
+  // --- Confirm-before-change dialog (resolves true on OK) ---
+  function ask({ title, html, ok = 'OK', danger = false, head = 'c-yellow' }) {
+    return new Promise((resolve) => {
+      const dlg = $('#dlg-ask');
+      $('#ask-head').className = 'dlg-head ' + head;
+      $('#ask-title').textContent = title;
+      $('#ask-body').innerHTML = html;  // callers pass escaped HTML
+      const btn = $('#ask-ok');
+      btn.textContent = ok;
+      btn.className = 'btn ' + (danger ? 'stop' : 'main');
+      dlg.returnValue = '';
+      const onClose = () => { dlg.removeEventListener('close', onClose); resolve(dlg.returnValue === 'ok'); };
+      dlg.addEventListener('close', onClose);
+      dlg.showModal();
+    });
+  }
+  $('#ask-form').addEventListener('submit', (e) => { e.preventDefault(); $('#dlg-ask').close('ok'); });
+
+  // A change on any tab: disable the button, call the API, toast, reload the tab.
+  async function change(button, path, body, reload, busyText) {
+    const label = button.innerHTML;
+    button.disabled = true;
+    button.textContent = busyText || 'Working…';
+    try {
+      const res = await api(path, body);
+      if (res.message) toast(res.message);
+      if (reload) await loadTab(reload);
+      return true;
+    } catch (e) {
+      if (e.kind === 'login') { banner('login'); openLogin(); } else toast(e.message, true);
+      return false;
+    } finally {
+      button.disabled = false;
+      button.innerHTML = label;
+    }
+  }
+
+  // --- Activity ---
+  const EVENT = {
+    'new-device': ['New device', 'fill-yellow', (e) => `New device: ${e.name || e.mac}`],
+    'mac-change': ['New MAC', 'fill-lilac', (e) => `${e.name || e.mac} came back with a new random MAC`],
+    joined: ['Joined', 'fill-green', (e) => `${e.name || e.mac} joined`],
+    left: ['Left', 'fill-grey', (e) => `${e.name || e.mac} left`],
+    moved: ['Moved', 'fill-blue', (e) => `${e.name || e.mac} moved`],
+    'ip-change': ['New IP', 'fill-blue', (e) => `${e.name || e.mac} got a new IP`],
+    'internet-down': ['Offline', 'fill-red', () => 'The internet went down'],
+    'internet-up': ['Online', 'fill-green', () => 'The internet is back'],
+    'wan-ip': ['WAN IP', 'fill-orange', () => 'The ISP gave the router a new address'],
+    'router-restart': ['Restart', 'fill-orange', () => 'The router restarted'],
+    watching: ['Started', 'fill-grey', () => 'fun-router started watching'],
+  };
+  const dayKey = (ts) => new Date(ts * 1000).toDateString();
+
+  function renderActivity(a) {
+    const events = a.events || [];
+    if (events.length) store.set('frSeenTs', String(events[0].ts));
+    updateActivityBadge(events);
+    let lastDay = '';
+    const rows = events.map((e) => {
+      const [tagText, cls, text] = EVENT[e.kind] || [e.kind, 'fill-grey', () => e.kind];
+      const day = dayKey(e.ts);
+      const header = day !== lastDay ? `<h4 class="feed-day">${esc(day === dayKey(Date.now() / 1000) ? 'Today' : fmtDay(e.ts))}</h4>` : '';
+      lastDay = day;
+      const sub = [e.detail, e.ip, e.mac && e.kind !== 'new-device' ? null : e.mac].filter(Boolean).join(' · ');
+      return `${header}<div class="ev${e.kind === 'new-device' ? ' is-new' : ''}">
+        ${tag(tagText, cls)}<div class="ev-text"><b>${esc(text(e))}</b>${sub ? `<small>${esc(sub)}</small>` : ''}</div>
+        <time>${esc(fmtClock(e.ts))}</time></div>`;
+    }).join('');
+    const feed = card({
+      title: 'What\'s happening', sub: 'Joins, leaves, moves and new devices, checked every minute', color: 'c-yellow', wide: true,
+      status: a.recording ? pill('Watching', 'busy') : pill('Not recording', 'off'),
+      body: `${events.length ? `<div class="feed">${rows}</div>` : '<p class="chart-empty">Nothing yet. Events appear as devices come and go while fun-router runs and is logged in.</p>'}
+        <div>${why('activity.feed')}${whyPanel('activity.feed')}</div>`,
+    });
+    let log = '';
+    if (a.canLog && a.syslog) {
+      const s = a.syslog;
+      log = card({
+        title: 'Router event log', sub: s.enabled ? 'The router\'s own log, newest last' : 'Off: the router isn\'t keeping a log',
+        color: 'c-grey', wide: true, status: s.enabled ? pill('On', 'on') : pill('Off', 'off'),
+        body: `${s.enabled
+          ? (s.entries.length ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead><tbody>${s.entries.slice(-200).map((x) =>
+            `<tr><td>${esc(x.time)}</td><td>${esc(x.level)}</td><td style="text-align:left">${esc(x.message)}</td></tr>`).join('')}</tbody></table></div>`
+            : '<p class="chart-empty">The log is on but empty so far.</p>')
+          : '<p class="desc">Turning the log on makes the router keep its own record of logins, connection drops and other events. It stays on the router and is cleared when it restarts.</p>'}
+          <div class="btn-row"><button class="btn ${s.enabled ? '' : 'go'}" type="button" data-syslog="${s.enabled ? 'off' : 'on'}">${s.enabled ? 'Turn the log off' : 'Turn the log on'}</button></div>
+          <div>${why('ctl.syslog')}${whyPanel('ctl.syslog', null, 'ctl.syslog:activity')}</div>`,
+      });
+    }
+    $('#activity').innerHTML = feed + log;
+  }
+
+  function updateActivityBadge(events) {
+    const seen = +(store.get('frSeenTs') || 0);
+    const fresh = events.filter((e) => e.kind === 'new-device' && e.ts > seen && tab !== 'activity');
+    const badge = $('#act-count');
+    badge.hidden = !fresh.length;
+    badge.textContent = fresh.length;
+    const toasted = +(store.get('frToastTs') || 0);
+    fresh.filter((e) => e.ts > toasted).slice(0, 3).forEach((e) => toast(`New device on your network: ${e.name || e.mac}`, true));
+    if (events.length) store.set('frToastTs', String(Math.max(toasted, events[0].ts)));
+  }
+
+  async function pollActivity() {
+    if (document.hidden || !caps.includes('usage') || tab === 'activity') return;
+    try { updateActivityBadge((await api('/api/activity')).events || []); } catch (e) { /* login problems surface elsewhere */ }
+  }
+
+  // --- Controls ---
+  const DAY_PRESETS = [['School nights', ['Sun', 'Mon', 'Tue', 'Wed', 'Thu']], ['Weekend nights', ['Fri', 'Sat']], ['Every day', WEEKDAYS]];
+
+  function deviceName(c, mac) {
+    const d = (c.devices || []).find((x) => x.mac === mac);
+    return d ? d.name : mac;
+  }
+  function deviceSelect(c, id, filter) {
+    const opts = (c.devices || []).filter(filter || (() => true)).sort((a, b) => (b.online - a.online) || a.name.localeCompare(b.name))
+      .map((d) => `<option value="${esc(d.mac)}">${esc(d.name)}${d.ip ? ' · ' + esc(d.ip) : ''}${d.online ? '' : ' (offline)'}</option>`).join('');
+    return `<select class="input" id="${id}">${opts || '<option value="">No devices</option>'}</select>`;
+  }
+
+  function renderControls(c) {
+    const out = [];
+    if (c.schedules) {
+      const s = c.schedules;
+      const byMac = {};
+      s.rules.forEach((r) => { (byMac[r.mac] = byMac[r.mac] || []).push(r); });
+      const list = Object.entries(byMac).map(([mac, rules]) => `<div class="rule">
+          <div class="rule-main"><b>${esc(deviceName(c, mac))}</b>
+            ${rules.map((r) => `<span class="rule-line">${r.days.length ? r.days.map((d) => tag(d, 'plain')).join('') : tag('days unknown', 'plain')} <span class="mono">${esc(r.start)}–${esc(r.end)}</span></span>`).join('')}</div>
+          <button class="btn sm" type="button" data-sched-remove="${esc(mac)}" data-names="${esc(JSON.stringify(rules.map((r) => r.name)))}">Remove</button>
+        </div>`).join('');
+      out.push(card({
+        title: 'Bedtime', sub: 'Turn a device\'s internet off on a schedule', color: 'c-lilac',
+        status: s.enabled ? pill('On', 'on') : pill(s.rules.length ? 'Paused' : 'Off', 'off'),
+        body: `${list ? `<div class="rules">${list}</div>` : '<p class="hint">No schedules yet.</p>'}
+          <div class="ctl-form">
+            <label class="label" for="sch-dev">Device</label>${deviceSelect(c, 'sch-dev', (d) => !d.protected)}
+            <span class="label">Days</span>
+            <div class="chip-row" id="sch-days">${WEEKDAYS.map((d) => `<button class="chip sm" type="button" data-day="${d}" aria-pressed="${['Sun', 'Mon', 'Tue', 'Wed', 'Thu'].includes(d)}">${d}</button>`).join('')}</div>
+            <div class="chip-row">${DAY_PRESETS.map(([label, days]) => `<button class="chip sm" type="button" data-days="${days.join(',')}">${label}</button>`).join('')}</div>
+            <div class="time-row"><label class="field"><span class="label">Internet off from</span><input class="input" type="time" id="sch-start" value="23:00"></label>
+              <label class="field"><span class="label">Back on at</span><input class="input" type="time" id="sch-end" value="07:00"></label></div>
+            <div class="btn-row"><button class="btn main" type="button" id="sch-add">Add schedule</button>
+              ${s.rules.length ? `<button class="btn" type="button" data-sched-switch="${s.enabled ? 'off' : 'on'}">${s.enabled ? 'Pause all' : 'Resume all'}</button>` : ''}</div>
+          </div>
+          <div>${why('ctl.schedule')}${whyPanel('ctl.schedule')}</div>`,
+      }));
+    }
+    if (c.domains) {
+      const d = c.domains;
+      out.push(card({
+        title: 'Blocked websites', sub: 'Blocked for every device on your network', color: 'c-orange',
+        status: d.enabled ? pill(`${d.domains.length} blocked`, 'on') : pill(d.domains.length ? 'Paused' : 'Off', 'off'),
+        body: `${d.domains.length ? `<div class="rules">${d.domains.map((x) => `<div class="rule"><div class="rule-main"><b class="mono">${esc(x.domain)}</b></div>
+            <button class="btn sm" type="button" data-domain-remove="${esc(x.domain)}">Unblock</button></div>`).join('')}</div>` : '<p class="hint">Nothing blocked yet.</p>'}
+          <form class="ctl-form" id="dom-form">
+            <label class="label" for="dom-input">Website</label>
+            <input class="input" id="dom-input" placeholder="instagram.com" autocomplete="off" spellcheck="false" maxlength="200">
+            <div class="btn-row"><button class="btn main" type="submit">Block it</button>
+              ${d.domains.length ? `<button class="btn" type="button" data-domain-switch="${d.enabled ? 'off' : 'on'}">${d.enabled ? 'Pause blocking' : 'Resume blocking'}</button>` : ''}</div>
+          </form>
+          <div>${why('ctl.domains')}${whyPanel('ctl.domains')}</div>`,
+      }));
+    }
+    if (c.pins) {
+      out.push(card({
+        title: 'Pinned IPs', sub: 'A device always gets the same address', color: 'c-blue',
+        status: pill(`${c.pins.length} pinned`),
+        body: `${c.pins.length ? `<div class="rules">${c.pins.map((p) => `<div class="rule"><div class="rule-main"><b>${esc(deviceName(c, p.mac))}</b>
+            <span class="rule-line mono">${esc(p.ip)} · ${esc(p.mac)}</span></div>
+            <button class="btn sm" type="button" data-pin-remove="${esc(p.mac)}">Unpin</button></div>`).join('')}</div>` : '<p class="hint">No pinned addresses yet.</p>'}
+          <div class="ctl-form">
+            <label class="label" for="pin-dev">Device</label>${deviceSelect(c, 'pin-dev', (x) => x.ip && !c.pins.some((p) => p.mac === x.mac))}
+            <div class="btn-row"><button class="btn main" type="button" id="pin-add">Pin its current IP</button></div>
+          </div>
+          <div>${why('ctl.pins')}${whyPanel('ctl.pins')}</div>`,
+      }));
+    }
+    if (c.syslog) {
+      out.push(card({
+        title: 'Router event log', sub: 'Feeds extra events into the Activity tab', color: 'c-grey',
+        status: c.syslog.enabled ? pill('On', 'on') : pill('Off', 'off'),
+        body: `<p class="desc">${c.syslog.enabled ? 'The router is keeping its own event log. You can read it on the Activity tab.' : 'The router isn\'t keeping a log. Turn it on to see its own record of events on the Activity tab.'}</p>
+          <div class="btn-row"><button class="btn ${c.syslog.enabled ? '' : 'go'}" type="button" data-syslog="${c.syslog.enabled ? 'off' : 'on'}">${c.syslog.enabled ? 'Turn off' : 'Turn on'}</button></div>
+          <div>${why('ctl.syslog')}${whyPanel('ctl.syslog')}</div>`,
+      }));
+    }
+    $('#controls').innerHTML = out.join('') || '<div class="empty">This router has no controls fun-router can change.</div>';
+  }
+
+  $('#controls').addEventListener('click', async (e) => {
+    const t = e.target;
+    const day = t.closest('[data-day]');
+    if (day) { day.setAttribute('aria-pressed', String(day.getAttribute('aria-pressed') !== 'true')); return; }
+    const preset = t.closest('[data-days]');
+    if (preset) {
+      const want = preset.dataset.days.split(',');
+      $$('#sch-days [data-day]').forEach((b) => b.setAttribute('aria-pressed', String(want.includes(b.dataset.day))));
+      return;
+    }
+    if (t.closest('#sch-add')) {
+      const mac = $('#sch-dev').value;
+      const days = $$('#sch-days [data-day][aria-pressed="true"]').map((b) => b.dataset.day);
+      const start = $('#sch-start').value, end = $('#sch-end').value;
+      if (!mac || !days.length || !start || !end) { toast('Pick a device, at least one day and both times.', true); return; }
+      const name = deviceName(data.controls, mac);
+      const overnight = start > end;
+      const okGo = await ask({
+        title: `Bedtime for ${name}?`, head: 'c-lilac', ok: 'Add schedule',
+        html: `<p>Internet for <b>${esc(name)}</b> turns off at <b>${esc(start)}</b> and back on at <b>${esc(end)}</b>${overnight ? ' the next morning' : ''}, on ${esc(days.join(', '))}.</p>
+          <p class="note">${overnight ? 'The router can\'t store a time range that crosses midnight, so this is saved as two rules: until 23:59, then from 00:00 the next morning. ' : ''}The device stays on the Wi-Fi; only its internet stops. It follows the device's MAC address.</p>`,
+      });
+      if (okGo) await change(t.closest('#sch-add'), '/api/schedules', { action: 'add', mac, days, start, end }, 'controls');
+      return;
+    }
+    const sr = t.closest('[data-sched-remove]');
+    if (sr) { await change(sr, '/api/schedules', { action: 'remove', mac: sr.dataset.schedRemove, names: JSON.parse(sr.dataset.names) }, 'controls'); return; }
+    const ss = t.closest('[data-sched-switch]');
+    if (ss) { await change(ss, '/api/schedules', { action: ss.dataset.schedSwitch }, 'controls'); return; }
+    const dr = t.closest('[data-domain-remove]');
+    if (dr) { await change(dr, '/api/domains', { action: 'remove', domain: dr.dataset.domainRemove }, 'controls'); return; }
+    const ds = t.closest('[data-domain-switch]');
+    if (ds) { await change(ds, '/api/domains', { action: ds.dataset.domainSwitch }, 'controls'); return; }
+    if (t.closest('#pin-add')) {
+      const mac = $('#pin-dev').value;
+      if (!mac) { toast('Pick a device.', true); return; }
+      await change(t.closest('#pin-add'), '/api/pins', { action: 'add', mac }, 'controls');
+      return;
+    }
+    const pr = t.closest('[data-pin-remove]');
+    if (pr) { await change(pr, '/api/pins', { action: 'remove', mac: pr.dataset.pinRemove }, 'controls'); return; }
+  });
+  $('#controls').addEventListener('submit', async (e) => {
+    if (!e.target.closest('#dom-form')) return;
+    e.preventDefault();
+    const domain = $('#dom-input').value.trim();
+    if (!domain) return;
+    const okGo = await ask({
+      title: `Block ${domain}?`, head: 'c-orange', ok: 'Block it',
+      html: `<p>Every device on your network stops reaching <b>${esc(domain)}</b>.</p><p class="note">The router refuses to look the name up. Devices that use their own DNS (DNS-over-HTTPS in a browser, a VPN) can still get through, and pages already loaded may keep working for a few minutes until their cached lookup expires.</p>`,
+    });
+    if (okGo) await change(e.target.querySelector('button[type="submit"]'), '/api/domains', { action: 'add', domain }, 'controls');
+  });
+  // The event-log switch lives on two tabs
+  document.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-syslog]');
+    if (!b) return;
+    const on = b.dataset.syslog === 'on';
+    if (on && !(await ask({ title: 'Turn on the router\'s event log?', head: 'c-grey', ok: 'Turn on',
+      html: '<p>The router keeps a record of its own events (logins, connection drops, DHCP and Wi-Fi activity) in its memory. It never leaves the router; fun-router just reads it. Restarting the router clears it.</p>' }))) return;
+    await change(b, '/api/syslog', { on }, tab);
+  });
+
+  // --- Wi-Fi tuning ---
+  const POWERS = [100, 70, 50, 35, 15];
+  const isDfs = (ch) => ch >= 52 && ch <= 144;
+
+  function tuneSection(r, panelRadio) {
+    const t = r.tune || {};
+    if (!t.supported) return `<p class="hint">${esc(t.why || 'This radio can only be changed on the router\'s own page.')}</p>`;
+    const widths = Object.keys(t.options).map(Number);
+    const rec = r.recommend;
+    const mine = panelRadio === r.id;
+    return `<div class="tune" data-radio="${esc(r.id)}" data-band="${esc(r.band)}" data-mine="${mine}">
+      ${rec ? `<div class="suggest"><div><span class="label">Suggestion</span><p>${esc(rec.reason)}</p></div>
+        <button class="btn go" type="button" data-tune-apply data-width="${rec.width}" data-channel="${rec.channel}">Apply suggestion</button></div>`
+        : '<p class="hint">This radio is already on the least crowded channel from the last scan.</p>'}
+      <div class="tune-grid">
+        <label class="field"><span class="label">Width</span><select class="input" data-tune="width">${widths.map((w) => `<option value="${w}" ${w === r.widthMhz ? 'selected' : ''}>${w} MHz</option>`).join('')}</select></label>
+        <label class="field"><span class="label">Channel</span><select class="input" data-tune="channel">${channelOptions(t.options[r.widthMhz] || [], r.autoChannel ? 0 : r.channel, r.autoChannel ? { now: r.channel } : null)}</select></label>
+        <label class="field"><span class="label">Power</span><select class="input" data-tune="power">${POWERS.map((p) => `<option value="${p}" ${p === r.powerPercent ? 'selected' : ''}>${p}%</option>`).join('')}</select></label>
+      </div>
+      <div class="btn-row"><button class="btn" type="button" data-tune-apply>Apply these settings</button></div>
+      <div>${why('wifi.tune', 'What changing these does')}${whyPanel('wifi.tune', null, 'wifi.tune:' + r.id)}</div>
+    </div>`;
+  }
+  // Channel 0 is "Auto": offered only while the radio is on Auto at its current width (it can be kept, not chosen).
+  const channelOptions = (list, current, auto) =>
+    (auto ? `<option value="0" ${current === 0 ? 'selected' : ''}>Auto${auto.now ? ` (on ${auto.now} now)` : ''}</option>` : '')
+    + list.map((ch) => `<option value="${ch}" ${ch === current ? 'selected' : ''}>${ch}${isDfs(ch) ? ' (DFS)' : ''}</option>`).join('');
+  const chLabel = (ch) => (ch ? `channel ${ch}` : 'Auto channel');
+
+  $('#wifi').addEventListener('change', (e) => {
+    const sel = e.target.closest('[data-tune="width"]');
+    if (!sel) return;
+    const box = sel.closest('.tune');
+    const radio = (data.wifi.radios || []).find((r) => r.id === box.dataset.radio);
+    const list = radio.tune.options[sel.value] || [];
+    const auto = radio.autoChannel && +sel.value === radio.widthMhz ? { now: radio.channel } : null;
+    const chSel = box.querySelector('[data-tune="channel"]');
+    const keep = +chSel.value;
+    chSel.innerHTML = channelOptions(list, (keep === 0 ? auto : list.includes(keep)) ? keep : list[0], auto);
+  });
+  $('#wifi').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-tune-apply]');
+    if (!b) return;
+    const box = b.closest('.tune');
+    const radio = (data.wifi.radios || []).find((r) => r.id === box.dataset.radio);
+    const width = +(b.dataset.width || box.querySelector('[data-tune="width"]').value);
+    const channel = +(b.dataset.channel || box.querySelector('[data-tune="channel"]').value);
+    const power = b.dataset.width ? radio.powerPercent : +box.querySelector('[data-tune="power"]').value;
+    const current = radio.autoChannel ? 0 : radio.channel;
+    if (width === radio.widthMhz && channel === current && power === radio.powerPercent) { toast('Those are the current settings.'); return; }
+    const mine = box.dataset.mine === 'true';
+    const okGo = await ask({
+      title: `Change ${radio.band} GHz Wi-Fi?`, head: radio.band === '5' ? 'c-blue' : 'c-green', ok: 'Apply now',
+      html: `<p>${esc(radio.band)} GHz goes from <b>${radio.widthMhz} MHz, ${chLabel(current)}, ${radio.powerPercent}%</b> to <b>${width} MHz, ${chLabel(channel)}, ${power}%</b>.</p>
+        <p class="note">The radio restarts: every device on it (${radio.clients} now) drops off for about 5–30 seconds, then reconnects by itself.${isDfs(channel) ? ' Channel ' + channel + ' is a DFS channel, so the radio first listens for radar for about a minute before anyone can connect.' : ''}${mine ? ' This computer is on this radio too, so it will lose its connection for a moment; fun-router keeps checking and confirms when the change is in.' : ''} The Wi-Fi name and password don't change.</p>`,
+    });
+    if (okGo) await change(b, '/api/wifi-tune', { radio: radio.id, width, channel, power }, 'wifi', 'Restarting the radio…');
+  });
+
+  // --- Security fixes ---
+  function checkFix(c) {
+    const routerIp = data.devices && data.devices.router && data.devices.router.lan ? data.devices.router.lan.ip : '192.168.1.1';
+    if (c.id === 'wps' && c.level !== 'good' && caps.includes('wps')) {
+      return '<div class="btn-row"><button class="btn go" type="button" data-fix="wps">Turn off WPS</button></div>';
+    }
+    if (c.id === 'pmf' && c.level !== 'good') {
+      return `<div class="fix-guide"><span class="label">How to fix it on the router's own page</span>
+        <ol><li>Open the router page and log in.</li><li>Go to <b>WLAN → wlan0 (5GHz) → Security</b>.</li>
+        <li>Set <b>IEEE 802.11w</b> to <b>Capable</b> and click <b>Apply Changes</b>.</li><li>Repeat under <b>wlan1 (2.4GHz) → Security</b>.</li></ol>
+        <p class="hint">fun-router doesn't do this one itself: that page also re-sends your Wi-Fi password and about 30 other security settings, and one mistake there would lock every device out.</p>
+        <a class="btn sm" href="http://${esc(routerIp)}/" target="_blank" rel="noopener">Open the router page</a></div>`;
+    }
+    return '';
+  }
+  $('#security').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-fix="wps"]');
+    if (!b) return;
+    const okGo = await ask({
+      title: 'Turn off WPS?', head: 'c-red', ok: 'Turn off WPS',
+      html: '<p>WPS gets switched off on both radios. New devices then join by typing the Wi-Fi password, which is the recommended setup.</p><p class="note">Each radio restarts while the change applies, so devices drop off for a few seconds and reconnect by themselves. The Wi-Fi name and password don\'t change.</p>',
+    });
+    if (okGo) await change(b, '/api/wps', { radio: 'all' }, 'security', 'Switching WPS off…');
+  });
+
   // --- Internet ---
   function renderInternet(info) {
     renderHero(info.router, info.wan);
@@ -658,22 +1003,37 @@
   }
 
   // --- Wi-Fi ---
+  // Where a channel's signal is centred. 40 MHz on 2.4 GHz pairs the primary with a channel
+  // 4 below ("upper" sideband, centre = primary - 2) or 4 above; 5 GHz bonds fixed blocks.
+  function spanCentre(band, ch, width, sideband) {
+    if (band === '2.4') {
+      if (width < 40) return ch;
+      return (sideband || (ch >= 7 ? 'upper' : 'lower')) === 'upper' ? ch - 2 : ch + 2;
+    }
+    if (width === 40) return ch >= 149 ? Math.floor((ch - 149) / 8) * 8 + 151 : Math.floor((ch - 36) / 8) * 8 + 38;
+    if (width >= 160) return ch >= 149 ? 163 : ch >= 100 ? 114 : 50;
+    if (width >= 80) return ch >= 149 ? 155 : Math.floor((ch - 36) / 16) * 16 + 42;
+    return ch;
+  }
+
   function channelMap(band, radios, neighbours) {
-    const nets = [
-      ...radios.filter((r) => r.band === band && r.channel).map((r) => ({ ch: r.channel, w: r.widthMhz || 20, sig: 95, cls: 'mine', label: r.ssid })),
-      ...neighbours.filter((n) => n.channel && (band === '2.4' ? n.channel <= 14 : n.channel > 14))
-        .map((n) => ({ ch: n.channel, w: n.widthMhz || 20, sig: n.signal || 10, cls: n.yours ? 'yours' : 'other', label: n.ssid })),
-    ];
-    if (!nets.length) return '<p class="hint">Nothing seen on this band in the last scan.</p>';
+    const mine = radios.filter((r) => r.band === band && r.channel)
+      .map((r) => ({ ch: r.channel, w: r.widthMhz || 20, sb: r.sideband, sig: 95, cls: 'mine', label: r.ssid }));
+    const others = neighbours.filter((n) => n.channel && (band === '2.4' ? n.channel <= 14 : n.channel > 14))
+      .map((n) => ({ ch: n.channel, w: n.widthMhz || 20, sig: n.signal || 10, cls: n.yours ? 'yours' : 'other', label: n.ssid }))
+      .sort((a, b) => b.sig - a.sig);  // strongest first, so weaker ones stay visible in front
+    if (!mine.length && !others.length) return '<p class="hint">Nothing seen on this band in the last scan.</p>';
     const ticks = band === '2.4' ? [1, 6, 11, 13] : [36, 52, 100, 116, 132, 149, 165];
     const W = 640, H = 170, pad = 14, base = H - 26;
     const lo = band === '2.4' ? -1 : 30, hi = band === '2.4' ? 15 : 171;
     const x = (ch) => pad + (ch - lo) / (hi - lo) * (W - pad * 2);
     const wpx = (mhz) => Math.max(12, (mhz / 5) / (hi - lo) * (W - pad * 2));
-    const rects = nets.sort((a, b) => a.sig - b.sig).map((n) => {
+    // This router goes in first (behind), as a tinted outline, so neighbours inside its span show through.
+    const rects = [...mine, ...others].map((n) => {
       const h = Math.max(8, (n.sig / 100) * (base - 12));
       const w = wpx(n.w);
-      return `<rect class="net ${n.cls}" x="${(x(n.ch) - w / 2).toFixed(1)}" y="${(base - h).toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="5"><title>${esc(n.label || 'Hidden network')} · channel ${n.ch} · ${n.w} MHz${n.cls === 'other' ? ' · ' + n.sig + '% signal' : ' · yours'}</title></rect>`;
+      const cx = x(spanCentre(band, n.ch, n.w, n.sb));
+      return `<rect class="net ${n.cls}" x="${(cx - w / 2).toFixed(1)}" y="${(base - h).toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="5"><title>${esc(n.label || 'Hidden network')} · channel ${n.ch} · ${n.w} MHz${n.cls === 'other' ? ' · ' + n.sig + '% signal' : ' · yours'}</title></rect>`;
     }).join('');
     const labels = ticks.map((ch) => `<text class="tick" x="${x(ch).toFixed(1)}" y="${H - 8}" text-anchor="middle">${ch}</text>`).join('');
     return `<svg class="chanmap" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(band)} GHz channel usage">
@@ -683,8 +1043,11 @@
   function renderWifi(info) {
     const radios = info.radios || [], neighbours = info.neighbours || [];
     const out = radios.map((r) => {
-      const overlaps = neighbours.filter((n) => !n.yours && n.channel &&
-        Math.abs(n.channel - r.channel) < (r.band === '2.4' ? 5 : 4)).length;
+      // Overlap = the two signals' frequency spans intersect (channel numbers are 5 MHz apart).
+      // Your own other access points count: they share the air like a neighbour's network.
+      const myCentre = spanCentre(r.band, r.channel, r.widthMhz || 20, r.sideband);
+      const overlaps = neighbours.filter((n) => n.bssid !== r.bssid && n.channel && (r.band === '2.4') === (n.channel <= 14) &&
+        Math.abs(spanCentre(r.band, n.channel, n.widthMhz || 20) - myCentre) < ((r.widthMhz || 20) + (n.widthMhz || 20)) / 10).length;
       const secTag = /WPA3/.test(r.security) ? tag('Strong', 'fill-green') : /WPA2/.test(r.security) ? tag('Good', 'fill-green') : tag('Weak', 'fill-red');
       const wpsValue = r.wps.enabled
         ? 'On' + (r.wps.defaultPin ? ' · factory PIN' : '') + tag(r.wps.defaultPin ? 'Turn off' : 'Consider off', 'fill-red')
@@ -703,7 +1066,8 @@
           ${readout('Protected management frames', esc(r.pmf || '—') + (r.pmf === 'off' ? tag('Off', 'fill-orange') : ''), 'wifi.pmf', { pmf: r.pmf }, 'wifi.pmf:' + r.id)}
           ${readout('WPS', wpsValue, 'wifi.wps', { enabled: r.wps.enabled, pin: r.wps.pin, defaultPin: r.wps.defaultPin }, 'wifi.wps:' + r.id)}
           ${readout('Guest networks', esc(`${r.guestNetworks.used} of ${r.guestNetworks.slots} in use`), 'wifi.guest', r.guestNetworks, 'wifi.guest:' + r.id)}
-        </div>`,
+        </div>
+        ${caps.includes('wifi-tune') ? `<div class="tune-head"><span class="label">Channel, width and power</span></div>${tuneSection(r, info.panelRadio)}` : ''}`,
       });
     });
 
@@ -745,6 +1109,7 @@
         ${pill(LEVEL[c.level][0], LEVEL[c.level][1])}
         <h3>${esc(c.title)}</h3>
         <p>${esc(c.detail)}</p>
+        ${checkFix(c)}
       </article>`).join('')}</div>`;
   }
 
@@ -1141,11 +1506,13 @@
   // --- Clock + polling ---
   setInterval(() => {
     $('#updated').textContent = lastOk
-      ? 'Updated ' + Math.round((Date.now() - lastOk) / 1000) + 's ago · refreshes every ' + POLL_MS / 1000 + 's'
+      ? 'Updated ' + Math.round((Date.now() - lastOk) / 1000) + 's ago · ' + (NO_AUTO_REFRESH.includes(tab) ? 'press Refresh to update' : 'refreshes every ' + POLL_MS / 1000 + 's')
       : 'Talking to the router…';
   }, 1000);
-  setInterval(() => { if (!document.hidden && tab !== 'tools') loadTab(tab, true); }, POLL_MS);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && tab !== 'tools') loadTab(tab, true); });
+  setInterval(() => { if (!document.hidden && !NO_AUTO_REFRESH.includes(tab)) loadTab(tab, true); }, POLL_MS);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !NO_AUTO_REFRESH.includes(tab)) loadTab(tab, true); });
+  setInterval(pollActivity, 30000);
+  setTimeout(pollActivity, 4000);
 
   applyTheme();
   buildPresets('down');

@@ -144,6 +144,11 @@ button { cursor: pointer; }
   font: 700 11.5px/1.25 var(--body); letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap;
 }
 .tag.plain { background: var(--card); color: var(--text); }
+/* .tag sets a grey background after the shared fill-* classes, so restate them for tags */
+.tag.fill-green { background: var(--green); } .tag.fill-red { background: var(--red); }
+.tag.fill-orange { background: var(--orange); } .tag.fill-blue { background: var(--blue); }
+.tag.fill-yellow { background: var(--yellow); } .tag.fill-pink { background: var(--pink); }
+.tag.fill-lilac { background: var(--lilac); } .tag.fill-grey { background: var(--grey); }
 .tags { display: flex; flex-wrap: wrap; gap: 8px; }
 
 .chip {
@@ -350,7 +355,7 @@ button { cursor: pointer; }
 .chanmap .axis { stroke: var(--ink); stroke-width: 2; }
 .chanmap .tick { fill: var(--muted); font: 700 11px var(--mono); }
 .chanmap .net { stroke: var(--ink); stroke-width: 2; }
-.chanmap .net.mine { fill: var(--yellow); stroke-width: 3; }
+.chanmap .net.mine { fill: var(--yellow); fill-opacity: 0.35; stroke-width: 3; stroke-dasharray: 7 4; }
 .chanmap .net.yours { fill: var(--pink); }
 .chanmap .net.other { fill: var(--grey); fill-opacity: 0.75; }
 .legend { display: flex; flex-wrap: wrap; gap: 16px; font: 700 13px/1 var(--body); }
@@ -545,6 +550,45 @@ button.u-tile { cursor: pointer; }
 .data-table th:first-child, .data-table td:first-child { text-align: left; }
 .data-table th { font: 700 12px var(--body); letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
 .table-wrap { max-height: 320px; overflow: auto; }
+
+/* ---------- Activity feed ---------- */
+.feed { display: grid; gap: 10px; max-height: 620px; overflow: auto; padding-right: 6px; }
+.feed-day { margin: 10px 0 2px; font: 700 12px/1.2 var(--body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.feed-day:first-child { margin-top: 0; }
+.ev {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  padding: 10px 12px; background: var(--field); border: 2.5px solid var(--ink); border-radius: 12px;
+}
+.ev.is-new { background: var(--yellow); color: var(--on-accent); }
+.ev .tag { min-width: 86px; justify-content: center; }
+.ev-text { display: grid; gap: 2px; min-width: 0; }
+.ev-text b { font: 700 15px/1.3 var(--body); overflow-wrap: anywhere; }
+.ev-text small { font: 500 12.5px/1.35 var(--mono); opacity: 0.75; overflow-wrap: anywhere; }
+.ev time { font: 700 13px/1 var(--mono); white-space: nowrap; }
+
+/* ---------- Controls ---------- */
+.rules { display: grid; gap: 10px; }
+.rule {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 10px 12px; background: var(--field); border: 2.5px solid var(--ink); border-radius: 12px;
+}
+.rule-main { display: grid; gap: 6px; min-width: 0; }
+.rule-main b { font: 700 15px/1.3 var(--body); overflow-wrap: anywhere; }
+.rule-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13.5px; }
+.ctl-form { display: grid; gap: 10px; padding-top: 6px; border-top: 2px dashed var(--chart-grid); }
+.time-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.tune-head { margin-top: 4px; padding-top: 14px; border-top: 2px dashed var(--chart-grid); }
+.tune { display: grid; gap: 12px; }
+.tune-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; }
+.suggest {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 14px; background: var(--explain-bg); border: 2.5px solid var(--ink); border-radius: 12px;
+}
+.suggest p { margin: 4px 0 0; font: 500 15px/1.45 var(--body); }
+.fix-guide { display: grid; gap: 8px; justify-items: start; padding: 12px 14px; background: var(--explain-bg); border: 2.5px dashed var(--ink); border-radius: 12px; }
+.fix-guide ol { margin: 0; padding-left: 20px; font: 500 14.5px/1.55 var(--body); }
+a.btn { text-decoration: none; }
+select.input { padding-right: 12px; }
 
 /* ---------- Small screens ---------- */
 @media (max-width: 640px) {

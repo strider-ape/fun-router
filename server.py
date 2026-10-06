@@ -194,6 +194,85 @@ def _fold_old_addresses(devices):
     return out
 
 
+WEEK = ('Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat')
+
+
+def _hhmm(text):
+    match = re.fullmatch(r'\s*(\d{1,2}):(\d{2})\s*', str(text or ''))
+    if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+        raise ValueError('Times look like 23:30')
+    return int(match.group(1)), int(match.group(2))
+
+
+def _domain(value):
+    """'https://www.Example.com/path' -> 'www.example.com'. Raises ValueError if it isn't a domain."""
+    text = str(value or '').strip().lower()
+    if '//' in text:
+        text = urllib.parse.urlsplit(text).hostname or ''
+    text = text.split('/')[0].strip('.')
+    if not re.fullmatch(r'(?=.{3,50}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+', text):
+        raise ValueError('Enter a domain like example.com (up to 50 characters)')
+    return text
+
+
+def channel_span(band, channel, width, sideband=None):
+    """(low, high) MHz a transmission occupies. Channel n is centred at 2407 + 5n MHz (2.4 GHz)
+    or 5000 + 5n MHz (5 GHz). 40 MHz on 2.4 GHz adds the channel 4 below ("upper" sideband) or
+    above; 5 GHz bonds fixed blocks (36-40, 36-48, 36-64, ...). Same rule as spanCentre() in app.js."""
+    width = width or 20
+    if band == '2.4':
+        centre = 2407 + 5 * channel
+        if width >= 40:
+            width = 40
+            centre += -10 if (sideband or ('upper' if channel >= 7 else 'lower')) == 'upper' else 10
+        return centre - width / 2, centre + width / 2
+    if width >= 160:
+        mid = 163 if channel >= 149 else 114 if channel >= 100 else 50
+    elif width >= 80:
+        mid = 155 if channel >= 149 else (channel - 36) // 16 * 16 + 42
+    elif width == 40:
+        mid = (channel - 149) // 8 * 8 + 151 if channel >= 149 else (channel - 36) // 8 * 8 + 38
+    else:
+        mid = channel
+    return 5000 + 5 * mid - width / 2, 5000 + 5 * mid + width / 2
+
+
+def recommend_channel(radio, neighbours):
+    """The least crowded channel for a radio from the last scan, or None if it's already there.
+
+    Score = each neighbour's signal strength times the share of our span it overlaps, in MHz.
+    Your own other access points count too: they share the air just like a neighbour's.
+    On 2.4 GHz only 1, 6 and 11 are considered, at 20 MHz (the only non-overlapping set).
+    On 5 GHz only non-DFS channels (plus the current one) are suggested, so a move never
+    makes the radio wait for a radar check.
+    """
+    options = (radio.get('tune') or {}).get('options') or {}
+    if not options or not radio.get('channel') or not radio.get('enabled', True):
+        return None
+    band, two_g = radio['band'], radio['band'] == '2.4'
+    near = [n for n in neighbours if n.get('channel') and (n['channel'] <= 14) == two_g
+            and n.get('bssid') != radio.get('bssid')]
+    spans = [(channel_span(band, n['channel'], n.get('widthMhz')), n.get('signal') or 10) for n in near]
+    width = 20 if two_g else (radio.get('widthMhz') or 80)
+    pool = (1, 6, 11) if two_g else (36, 40, 44, 48, 149, 153, 157, 161, radio['channel'])
+    candidates = sorted({c for c in pool if c in options.get(width, [])})
+    if not candidates:
+        return None
+
+    def overlapping(c):
+        lo, hi = channel_span(band, c, width)
+        return [(min(hi, b) - max(lo, a)) / (hi - lo) * sig for (a, b), sig in spans if min(hi, b) > max(lo, a)]
+
+    best = min(candidates, key=lambda c: (round(sum(overlapping(c)), 1), c != radio['channel']))
+    if best == radio['channel'] and width == radio.get('widthMhz'):
+        return None
+    crowd = len(overlapping(best))
+    why = ('%d network%s' % (crowd, ' overlaps it' if crowd == 1 else 's overlap it')) if crowd else 'nothing nearby overlaps it'
+    if two_g and radio.get('widthMhz') == 40:
+        why += '; at 40 MHz this radio spans two of the three non-overlapping channels, at 20 MHz just one'
+    return {'width': width, 'channel': best, 'reason': 'Channel %d at %d MHz: %s.' % (best, width, why)}
+
+
 # --- Panel state and actions ---
 
 class Panel:
@@ -210,6 +289,8 @@ class Panel:
         self.live = []          # [(time, down bit/s, up bit/s)] for the live graph, newest last
         self.live_prev = None   # (time, down counter, up counter)
         self.optics_at = 0
+        self.presence = None    # {mac: {iface, ip, name, missing}} for the activity feed
+        self.wan_state = None   # (up, wan ip, router uptime) at the last sample
         try:
             with open(NICKNAMES_FILE, encoding='utf-8') as f:
                 self.nicknames = json.load(f)
@@ -396,6 +477,7 @@ class Panel:
             optics = self.router.optics()
             self.optics_at = now
         self.usage.record(now, wan, stations, names, optics)
+        self._track_activity(now, clients)
 
     def stats(self, client_ip):
         if not self.usage:
@@ -426,6 +508,254 @@ class Panel:
                         del self.live[:-200]
             return {'points': [{'t': t, 'down': d, 'up': u} for t, d, u in self.live]}
 
+    # --- Activity: joins, leaves, moves, new devices, internet changes ---
+
+    def _name_of(self, mac, clients):
+        ip = (clients['dhcp'].get(mac) or {}).get('ip') or clients['arp'].get(mac)
+        return self.nicknames.get(mac) or (self.hostnames.get(ip, (None,))[0] if ip else None), ip
+
+    def _track_activity(self, now, clients):
+        """Compare who is connected now with the previous sample and log what changed.
+        A device counts as gone after 3 missed samples, so brief drop-outs aren't 'left'."""
+        store = self.usage
+        labels = {i['id']: i['label'] for i in self._interfaces(clients)}
+        present = {}
+        for radio_id, found in clients['stations'].items():
+            for mac in found:
+                present[mac] = radio_id
+        for mac, iface in clients['ports'].items():
+            present.setdefault(mac, iface)
+        known = store.known()
+        first_run = self.presence is None
+        if first_run:
+            self.presence = {}
+            if not known:  # the very first start: whoever is here now is the baseline, not "new"
+                for mac in present:
+                    store.remember(now, mac, self._name_of(mac, clients)[0])
+                store.add_event(now, 'watching', detail='%d device%s online' % (len(present), '' if len(present) == 1 else 's'))
+                known = store.known()
+        known_names = {n for n in known.values() if n}
+        for mac, iface in present.items():
+            name, ip = self._name_of(mac, clients)
+            where = labels.get(iface, iface)
+            prev = self.presence.get(mac)
+            if prev is None:
+                if mac not in known:
+                    # Same host name under a new MAC is a phone that rotated its random MAC.
+                    store.add_event(now, 'mac-change' if name and name in known_names else 'new-device', mac, name, ip, where)
+                    store.remember(now, mac, name)
+                elif not first_run:
+                    store.add_event(now, 'joined', mac, name, ip, where)
+            else:
+                if iface and prev['iface'] and prev['iface'] != iface:
+                    store.add_event(now, 'moved', mac, name, ip, '%s → %s' % (labels.get(prev['iface'], prev['iface']), where))
+                if prev['ip'] and ip and prev['ip'] != ip:
+                    store.add_event(now, 'ip-change', mac, name, ip, '%s → %s' % (prev['ip'], ip))
+            self.presence[mac] = {'iface': iface, 'ip': ip, 'name': name, 'missing': 0}
+        for mac in list(self.presence):
+            if mac in present:
+                continue
+            p = self.presence[mac]
+            p['missing'] += 1
+            if p['missing'] >= 3:
+                store.add_event(now, 'left', mac, p['name'], p['ip'], labels.get(p['iface'], p['iface']))
+                del self.presence[mac]
+        status = self._status()
+        wan = status.get('wan') or {}
+        up, ip, uptime = bool(wan.get('up')), wan.get('ip'), _seconds(status.get('uptime'))
+        if self.wan_state:
+            was_up, was_ip, was_uptime = self.wan_state
+            if uptime is not None and was_uptime is not None and uptime + 120 < was_uptime:
+                store.add_event(now, 'router-restart')
+            if up != was_up:
+                store.add_event(now, 'internet-up' if up else 'internet-down', ip=ip)
+            elif up and ip and was_ip and ip != was_ip:
+                store.add_event(now, 'wan-ip', ip=ip, detail='%s → %s' % (was_ip, ip))
+        self.wan_state = (up, ip, uptime)
+
+    def activity(self, client_ip):
+        if not self.usage:
+            raise ValueError('Activity needs the usage recorder')
+        out = {'events': self.usage.events(250), 'syslog': None, 'canLog': 'syslog' in self.router.capabilities,
+               'recording': bool(self.usage.last_sample)}
+        if out['canLog']:
+            out['syslog'] = self._cached('syslog', 15, self.router.syslog)
+        return out
+
+    # --- Controls: website blocking, bedtime schedules, pinned IPs, event log ---
+
+    def controls(self, client_ip):
+        caps = self.router.capabilities
+
+        def fetch():
+            got = {}
+            if 'domains' in caps:
+                got['domains'] = self.router.domain_blocks()
+            if 'schedules' in caps:
+                got['schedules'] = self.router.schedules()
+            if 'pins' in caps:
+                got['pins'] = self.router.pins()['pins']
+            if 'syslog' in caps:
+                log = self.router.syslog()
+                got['syslog'] = {'enabled': log['enabled'], 'level': log['level']}
+            return got
+        found = dict(self._cached('controls', 20, fetch))
+        clients, rules = self._clients(), self._rules()
+        found['devices'] = [{'mac': d['mac'], 'name': d['nickname'] or d['hostname'] or d['ip'] or d['mac'], 'ip': d['ip'],
+                             'online': d['online'], 'protected': d['protected']}
+                            for d in self._devices(clients, rules, client_ip) if not d['stale']]
+        return found
+
+    def _refresh_controls(self):
+        self._forget('controls', 'syslog')
+        return self.controls(None)
+
+    def _need(self, capability):
+        if capability not in self.router.capabilities:
+            raise ValueError('%s can\'t do that' % self.router.family)
+
+    def domains_action(self, body, client_ip):
+        self._need('domains')
+        action = str(body.get('action') or '')
+        with self.lock:
+            if action in ('on', 'off'):
+                self.router.set_domain_blocking(action == 'on')
+                if self._refresh_controls()['domains']['enabled'] != (action == 'on'):
+                    raise RouterError('The router did not save that')
+                return {'ok': True, 'message': 'Website blocking is %s' % action}
+            domain = _domain(body.get('domain'))
+            if action == 'add':
+                self.router.add_domain(domain)
+                got = self._refresh_controls()['domains']
+                if domain not in {d['domain'].lower() for d in got['domains']} or not got['enabled']:
+                    raise RouterError('The router did not save the block')
+                return {'ok': True, 'message': '%s is blocked for every device' % domain}
+            if action == 'remove':
+                self.router.remove_domains([domain])
+                if domain in {d['domain'].lower() for d in self._refresh_controls()['domains']['domains']}:
+                    raise RouterError('The router did not remove it')
+                return {'ok': True, 'message': '%s is unblocked' % domain}
+        raise ValueError('Unknown action')
+
+    def schedules_action(self, body, client_ip):
+        self._need('schedules')
+        action = str(body.get('action') or '')
+        with self.lock:
+            if action in ('on', 'off'):
+                self.router.set_schedules(action == 'on')
+                if self._refresh_controls()['schedules']['enabled'] != (action == 'on'):
+                    raise RouterError('The router did not save that')
+                return {'ok': True, 'message': 'Bedtime schedules are %s' % action}
+            mac = _mac(body.get('mac'))
+            if not mac:
+                raise ValueError('Pick a device')
+            if action == 'remove':
+                names = {str(n) for n in body.get('names') or []}
+                rules = [r for r in self.router.schedules()['rules'] if r['mac'] == mac and (not names or r['name'] in names)]
+                if rules:
+                    self.router.remove_schedules(rules)
+                    if any(r['mac'] == mac and (not names or r['name'] in names)
+                           for r in self._refresh_controls()['schedules']['rules']):
+                        raise RouterError('The router did not remove the schedule')
+                return {'ok': True, 'message': 'Schedule removed'}
+            if action != 'add':
+                raise ValueError('Unknown action')
+            device = next((d for d in self._devices(self._clients(), self._rules(), client_ip) if d['mac'] == mac), None)
+            if device and device['protected']:
+                raise ValueError('Protected: ' + device['protected'])
+            days = [d for d in WEEK if d in (body.get('days') or [])]
+            if not days:
+                raise ValueError('Pick at least one day')
+            start, end = _hhmm(body.get('start')), _hhmm(body.get('end'))
+            if start == end:
+                raise ValueError('Start and end can\'t be the same time')
+            label = re.sub(r'[^A-Za-z0-9 ._-]', '', (device and (device['nickname'] or device['hostname'])) or mac.replace(':', ''))[:20].strip() or 'Device'
+            # The router needs start < end on one day; a night block becomes two rules.
+            if start < end:
+                parts = [(label + ' block', days, start, end)]
+            else:
+                nxt = [WEEK[(WEEK.index(d) + 1) % 7] for d in days]
+                parts = [(label + ' night', days, start, (23, 59)), (label + ' morning', nxt, (0, 0), end)]
+                if end == (0, 0):
+                    parts = parts[:1]
+            for name, ds, s, e in parts:
+                self.router.add_schedule(name, mac, ds, s, e)
+            saved = {r['name'] for r in self._refresh_controls()['schedules']['rules'] if r['mac'] == mac}
+            if not all(p[0] in saved for p in parts):
+                raise RouterError('The router did not save the schedule')
+            return {'ok': True, 'message': 'Schedule added for %s' % label}
+
+    def pins_action(self, body, client_ip):
+        self._need('pins')
+        action = str(body.get('action') or '')
+        mac = _mac(body.get('mac'))
+        if not mac:
+            raise ValueError('Pick a device')
+        with self.lock:
+            if action == 'add':
+                device = next((d for d in self._devices(self._clients(), self._rules(), client_ip) if d['mac'] == mac), None)
+                if not device or not device['ip']:
+                    raise ValueError('That device has no IP address right now')
+                self.router.add_pin(mac, device['ip'])
+                if not any(p['mac'] == mac and p['ip'] == device['ip'] for p in self._refresh_controls()['pins']):
+                    raise RouterError('The router did not save the pin')
+                return {'ok': True, 'message': '%s will always get %s' % (device['nickname'] or device['hostname'] or mac, device['ip'])}
+            if action == 'remove':
+                self.router.remove_pin(mac)
+                if any(p['mac'] == mac for p in self._refresh_controls()['pins']):
+                    raise RouterError('The router did not remove the pin')
+                return {'ok': True, 'message': 'IP pin removed'}
+        raise ValueError('Unknown action')
+
+    def syslog_action(self, body, client_ip):
+        self._need('syslog')
+        on = bool(body.get('on'))
+        with self.lock:
+            self.router.set_syslog(on)
+            if self._refresh_controls()['syslog']['enabled'] != on:
+                raise RouterError('The router did not save that')
+        return {'ok': True, 'message': 'Router event log is %s' % ('on' if on else 'off')}
+
+    def wps_action(self, body, client_ip):
+        self._need('wps')
+        radios = self._cached('radios', 120, self.router.radios, force=True)
+        target = str(body.get('radio') or 'all')
+        todo = [r['id'] for r in radios if r['wps']['enabled'] and target in ('all', r['id'])]
+        for radio_id in todo:
+            self.router.disable_wps(radio_id)
+        self._forget('radios', 'security')
+        left = [r for r in self._cached('radios', 120, self.router.radios) if r['wps']['enabled'] and r['id'] in todo]
+        if left:
+            raise RouterError('WPS is still on for %s' % ', '.join('%s GHz' % r['band'] for r in left))
+        return {'ok': True, 'message': 'WPS is off' if todo else 'WPS was already off'}
+
+    def wifi_tune(self, body, client_ip):
+        self._need('wifi-tune')
+        radio = str(body.get('radio') or '')
+        width, channel, power = _int(body.get('width')), _int(body.get('channel')), _int(body.get('power'))
+        before = self.router.wifi_state(radio)
+        ssid = self.router.tune_wifi(radio, width=width, channel=channel, power=power)
+        self._forget('radios', 'security', 'neighbours', 'clients')
+        # The radio restarts; read the settings back until they show up (up to a minute).
+        want = (width or before['width'], before['channel'] if channel is None else channel,
+                before['power'] if power is None else power)
+        deadline = time.time() + 60
+        while True:
+            try:
+                now = self.router.wifi_state(radio)
+                if now['ssid'] != ssid:
+                    raise RouterError('The Wi-Fi name changed unexpectedly. Check the router\'s own page now.')
+                if (now['width'], now['channel'], now['power']) == want:
+                    break
+            except (RouterError, OSError) as e:
+                if 'name changed' in str(e):
+                    raise
+            if time.time() > deadline:
+                raise RouterError('The router did not confirm the change within a minute')
+            time.sleep(3)
+        return {'ok': True, 'message': 'Wi-Fi updated: %d MHz, %s, %d%% power' % (
+            want[0], 'channel %d' % want[1] if want[1] else 'Auto channel', want[2])}
+
     # --- Internet, Wi-Fi and security views (read-only) ---
 
     def internet(self, client_ip):
@@ -449,7 +779,12 @@ class Panel:
         yours = {r['bssid'] for r in radios} | set(clients['dhcp'])
         for n in neighbours:
             n['yours'] = n['bssid'] in yours
-        return {'radios': [dict(r, clients=counts.get(r['id'], 0)) for r in radios], 'neighbours': neighbours}
+        out = [dict(r, clients=counts.get(r['id'], 0)) for r in radios]
+        for r in out:
+            r['recommend'] = recommend_channel(r, neighbours)
+        return {'radios': out, 'neighbours': neighbours, 'panelRadio': next(
+            (rid for rid, found in clients['stations'].items() if any(
+                (clients['dhcp'].get(m) or {}).get('ip') == self.own_ip for m in found)), None)}
 
     def security(self, client_ip):
         settings = self._cached('security', 120, self.router.security)
@@ -504,6 +839,7 @@ class Panel:
         return (device and (device['nickname'] or device['hostname'] or device['ip'])) or mac
 
     def block(self, body, client_ip):
+        self._need('block')
         with self.lock:
             mac, device, _ = self._find(body, client_ip)
             if not device:
@@ -518,6 +854,7 @@ class Panel:
             return {'ok': True, 'message': '%s is blocked' % self._label(device, mac)}
 
     def unblock(self, body, client_ip):
+        self._need('block')
         with self.lock:
             mac, device, rules = self._find(body, client_ip)
             mine = [r for r in rules['blocks'] if r['src'] == mac]
@@ -537,6 +874,7 @@ class Panel:
         return rate
 
     def limit(self, body, client_ip):
+        self._need('limit')
         down, up = self._rate(body.get('down')), self._rate(body.get('up'))
         if not down and not up:
             raise ValueError('Set a download or upload limit')
@@ -561,6 +899,7 @@ class Panel:
             return {'ok': True, 'message': 'Speed limit set for %s' % self._label(device, mac)}
 
     def unlimit(self, body, client_ip):
+        self._need('limit')
         with self.lock:
             mac, device, rules = self._find(body, client_ip)
             ip = device and device['ip']
@@ -771,6 +1110,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '/api/diag': self.panel.diag_poll,
             '/api/stats': self.panel.stats,
             '/api/live': self.panel.live_rate,
+            '/api/activity': self.panel.activity,
+            '/api/controls': self.panel.controls,
         }
         if path in views:
             if self._allowed(api=True):
@@ -789,6 +1130,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '/api/name': self.panel.rename,
             '/api/login': self.panel.login,
             '/api/logout': self.panel.logout,
+            '/api/domains': self.panel.domains_action,
+            '/api/schedules': self.panel.schedules_action,
+            '/api/pins': self.panel.pins_action,
+            '/api/syslog': self.panel.syslog_action,
+            '/api/wps': self.panel.wps_action,
+            '/api/wifi-tune': self.panel.wifi_tune,
             '/api/diag': self.panel.diag_start,
         }
         fn = actions.get(urllib.parse.urlparse(self.path).path)

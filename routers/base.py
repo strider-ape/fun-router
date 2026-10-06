@@ -27,7 +27,7 @@ _CELL = re.compile(r'<t[hd][^>]*>(.*?)(?=<t[hd][\s>]|</t[hd]>|\Z)', re.S | re.I)
 _TAG = re.compile(r'<[^>]+>')
 _INPUT = re.compile(r'<input\b[^>]*>', re.I)
 _ATTR = re.compile(r'([\w-]+)(?:\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+))?')
-IP = re.compile(r'^\d{1,3}(\.\d{1,3}){3}$')
+IP = re.compile(r'\A\d{1,3}(\.\d{1,3}){3}\Z')  # \Z: no trailing newline
 _MAC = re.compile(r'^[0-9a-f]{2}([:-]?)[0-9a-f]{2}(\1[0-9a-f]{2}){4}$', re.I)
 _NUMBER = re.compile(r'-?\d+(?:\.\d+)?')
 
@@ -95,7 +95,8 @@ class Driver:
     in `capabilities`; the panel hides features a router doesn't have. Methods for
     missing capabilities can be left unimplemented.
 
-    Capabilities: devices, block, limit, internet, fibre, wifi, security, ping, traceroute, usage.
+    Capabilities: devices, block, limit, internet, fibre, wifi, security, ping, traceroute, usage,
+    domains, schedules, pins, syslog, wps, wifi-tune.
     """
 
     family = 'Unknown router'
@@ -167,6 +168,66 @@ class Driver:
         raise NotImplementedError
 
     def remove_limits(self, ids):
+        raise NotImplementedError
+
+    # Controls. Each write is read back by the panel, so these only need to submit.
+    def domain_blocks(self):
+        """{enabled, domains: [{domain, ...driver fields needed to delete it}]} ('domains')"""
+        raise NotImplementedError
+
+    def add_domain(self, domain):
+        """Block a domain for every device, switching domain blocking on if it is off."""
+        raise NotImplementedError
+
+    def remove_domains(self, domains):
+        raise NotImplementedError
+
+    def set_domain_blocking(self, on):
+        raise NotImplementedError
+
+    def schedules(self):
+        """{enabled, rules: [{name, mac, days: ['Mon', ...], start: 'HH:MM', end: 'HH:MM', ...}]} ('schedules')"""
+        raise NotImplementedError
+
+    def add_schedule(self, name, mac, days, start, end):
+        """Cut a device's internet on `days` from `start` to `end`, both (hour, minute) with start < end."""
+        raise NotImplementedError
+
+    def remove_schedules(self, rules):
+        raise NotImplementedError
+
+    def set_schedules(self, on):
+        raise NotImplementedError
+
+    def pins(self):
+        """{pins: [{mac, ip, enabled, ...}]}: DHCP reservations ('pins')."""
+        raise NotImplementedError
+
+    def add_pin(self, mac, ip):
+        raise NotImplementedError
+
+    def remove_pin(self, mac):
+        raise NotImplementedError
+
+    def syslog(self):
+        """{enabled, level, entries: [{time, facility, level, message}]}: the router's own log ('syslog')."""
+        raise NotImplementedError
+
+    def set_syslog(self, on):
+        """Switch the router's local log on or off. Never remote logging."""
+        raise NotImplementedError
+
+    # Wi-Fi writes. These must never change the network name, password or security settings.
+    def disable_wps(self, radio_id):
+        """Turn WPS off on one radio ('wps')."""
+        raise NotImplementedError
+
+    def wifi_state(self, radio_id):
+        """{ssid, width (MHz), channel (0 = Auto), power (%)} as the radio is configured ('wifi-tune')."""
+        raise NotImplementedError
+
+    def tune_wifi(self, radio_id, width=None, channel=None, power=None):
+        """Change width, channel and transmit power; None keeps a setting. Returns the SSID."""
         raise NotImplementedError
 
     # Diagnostics, run by the router itself

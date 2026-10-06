@@ -251,6 +251,50 @@
       effect: READING,
     },
 
+    /* ---------- Activity ---------- */
+    'activity.feed': {
+      title: 'How the activity feed works',
+      what: 'Every minute fun-router compares who is connected now with a minute ago: devices in the router\'s Wi-Fi station tables, plus anything its bridge table saw on a cable or the access point. Differences become events. A device only counts as gone after 3 missed minutes, so a phone briefly dozing doesn\'t spam "left / joined".',
+      change: 'A "new device" is a MAC address fun-router has never seen. If its host name matches a device it already knows, it\'s logged as "new random MAC" instead, because that\'s almost always a phone rotating its private address. Devices behind the access point leave the bridge table about 5 minutes after going quiet, so their "left" shows up late. Nothing is recorded while fun-router isn\'t running or is logged out.',
+      example: 'A visitor\'s phone joining your 2.4 GHz Wi-Fi shows up as "New device: Galaxy-S24", with a toast and a badge on this tab.',
+      effect: READING,
+    },
+
+    /* ---------- Controls ---------- */
+    'ctl.schedule': {
+      title: 'How bedtime schedules work',
+      what: 'Each schedule is a parental-control rule on the router: during the time window, on the chosen days, the router drops that MAC address\'s internet traffic. It uses the router\'s own clock, which it sets from the internet (NTP).',
+      change: 'At the start time open connections stop; at the end time the device can reach the internet again. It stays on the Wi-Fi and can still reach printers or TVs on your network. The router can\'t store a range that crosses midnight, so 23:00–07:00 is saved as 23:00–23:59 on the chosen days plus 00:00–07:00 the following mornings. A phone with a rotating private MAC escapes the rule when its MAC changes, so set it to use its device MAC on your network.',
+      example: 'School nights 22:30–06:30 for a tablet: blocked Sunday to Thursday from 22:30, back at 06:30 Monday to Friday.',
+    },
+    'ctl.domains': {
+      title: 'How website blocking works',
+      what: 'The router refuses to look up the blocked name for any device that uses it for DNS (most devices do, because the router hands itself out as the DNS server). Without a lookup, the device can\'t find the site\'s address.',
+      change: 'Applies to every device at once. It doesn\'t stop devices that use their own DNS: browsers with DNS-over-HTTPS turned on, VPNs, or apps with a built-in resolver. Lookups already cached on a device keep working until they expire, usually within minutes. Big sites also use other domains for images and video, so a partly blocked site can look broken rather than gone.',
+      example: 'Blocking <code>instagram.com</code> stops the app on most phones within a few minutes. It keeps working on a laptop with a VPN on.',
+    },
+    'ctl.pins': {
+      title: 'How IP pinning works',
+      what: 'A pin is a DHCP reservation: the router always offers the same IP address to that MAC address, instead of whichever address is free.',
+      change: 'The device keeps its current address now, and gets the same one every time its lease renews. That keeps speed limits (which the router ties to an IP) on the right device, and gives printers and servers a stable address. A phone with a rotating private MAC won\'t match the pin after it changes its MAC.',
+      example: 'Pinning a laptop at 192.168.1.13 means a speed limit on .13 always hits that laptop, even after a week away.',
+    },
+    'ctl.syslog': {
+      title: 'The router\'s event log',
+      what: 'The router\'s own log of system events (logins, connection drops, and DHCP and Wi-Fi messages at the "informational" level), kept in a small buffer in its memory.',
+      change: 'Turning it on costs the router almost nothing. The log stays on the router: fun-router only reads it, and only to the local page. It\'s cleared when the router restarts, and old lines roll off as new ones arrive. fun-router only ever switches on local logging, never sending the log to another server.',
+      example: 'After a drop-out you can see the exact minute the fibre connection went down and came back.',
+      effect: READING,
+    },
+
+    /* ---------- Wi-Fi tuning ---------- */
+    'wifi.tune': {
+      title: 'What changing channel, width or power does',
+      what: 'These go to the router\'s own Wi-Fi settings form, with the Wi-Fi name, password and security left exactly as they are. The suggestion picks the channel where nearby networks from the last scan overlap least: each network counts by its signal strength times the share of the channel\'s frequency span it covers. Your other access points count too. A radio on Auto stays on Auto unless you pick a channel.',
+      change: 'Applying restarts the radio: every device on it drops off for about 5–30 seconds and reconnects by itself. 5 GHz channels 52–144 are DFS channels, where the radio must listen for radar for about a minute before anyone can connect, and must leave if radar shows up. Lower power shrinks coverage, which helps devices upstairs switch to the access point sooner.',
+      example: 'Channel 11 at 40 MHz is bonded with channel 7 and spans 2432–2472 MHz. At 20 MHz it spans 2452–2472 MHz, so it stops overlapping a neighbour on channel 6 (2427–2447 MHz).',
+    },
+
     /* ---------- Tools ---------- */
     'tool.ping': {
       title: 'Ping',
