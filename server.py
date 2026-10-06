@@ -518,6 +518,12 @@ class Panel:
             self.cache.clear()
         return {'ok': True}
 
+    def logout(self, body, client_ip):
+        with self.lock:
+            self.router.logout()
+            self.cache.clear()
+        return {'ok': True, 'message': 'Logged out of the router'}
+
 
 def security_checks(s, radios, status):
     """Turn raw settings into a check-up list: {id, level: good|info|warn|bad, title, detail}."""
@@ -704,6 +710,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '/api/unlimit': self.panel.unlimit,
             '/api/name': self.panel.rename,
             '/api/login': self.panel.login,
+            '/api/logout': self.panel.logout,
             '/api/diag': self.panel.diag_start,
         }
         fn = actions.get(urllib.parse.urlparse(self.path).path)

@@ -21,6 +21,7 @@
   let pin = store.get('panelPin') || '';
   let current = null;         // device a dialog is acting on
   let loginDismissed = false;
+  let loggedOut = false;      // the user pressed Log out (vs. the router timing us out)
   let explainAll = store.get('frExplain') === '1';
   let caps = [];
   const opened = new Set();   // explainers the user opened; kept open across the 10 s re-renders
@@ -150,7 +151,7 @@
       banner(null);
       if (tab === name) RENDERERS[name](payload);
     } catch (e) {
-      if (e.kind === 'login') { banner('login'); if (!loginDismissed && !anyDialogOpen()) openLogin(); }
+      if (e.kind === 'login') { banner(loggedOut ? 'loggedout' : 'login'); if (!loginDismissed && !anyDialogOpen()) openLogin(); }
       else if (e.kind === 'pin') openPin();
       else if (!quiet) banner('error', e.message);
       if (tab === name && !data[name]) renderEmpty(name, e.kind === 'login' ? 'Log in to the router to see this.' : e.message);
@@ -614,10 +615,12 @@
     const el = $('#banner');
     if (!kind) { el.classList.remove('show'); return; }
     $('#banner-text').textContent = kind === 'login'
-      ? 'The router logged this computer out, so the panel can\'t read it right now.' : msg;
+      ? 'The router logged this computer out, so the panel can\'t read it right now.'
+      : kind === 'loggedout' ? 'You logged out of the router. Log in again to see live data.' : msg;
     const btn = $('#banner-btn');
-    btn.textContent = kind === 'login' ? 'Log in' : 'Try again';
-    btn.onclick = kind === 'login' ? openLogin : () => loadTab(tab);
+    const needsLogin = kind === 'login' || kind === 'loggedout';
+    btn.textContent = needsLogin ? 'Log in' : 'Try again';
+    btn.onclick = needsLogin ? () => { loginDismissed = false; openLogin(); } : () => loadTab(tab);
     el.classList.add('show');
   }
   function toast(msg, bad) {
@@ -740,7 +743,7 @@
     e.preventDefault();
     const ok = await run($('#login-go'), '/api/login', { username: $('#login-user').value, password: $('#login-pass').value });
     $('#login-pass').value = '';
-    if (ok) { $('#dlg-login').close(); loginDismissed = false; toast('Logged in to the router'); loadTab(tab); }
+    if (ok) { $('#dlg-login').close(); loginDismissed = false; loggedOut = false; toast('Logged in to the router'); loadTab(tab); }
   });
   $('#pin-form').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -775,6 +778,26 @@
   });
   $('#q').addEventListener('input', (e) => { query = e.target.value; if (data.devices) renderDevices(data.devices); });
   $('#refresh').addEventListener('click', () => loadTab(tab));
+  $('#logout').addEventListener('click', async (e) => {
+    const btn = e.currentTarget, label = btn.innerHTML;
+    btn.disabled = true;
+    btn.textContent = 'Logging out…';
+    try {
+      await api('/api/logout', {});
+      loginDismissed = true;  // don't pop the login dialog on the next poll; the banner offers it
+      loggedOut = true;
+      const p = $('#net-pill');
+      p.textContent = 'Logged out';
+      p.className = 'pill big fill-grey';
+      toast('Logged out of the router');
+    } catch (err) {
+      if (err.kind !== 'login') toast(err.message, true); else loginDismissed = true;  // already logged out
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = label;
+      banner('loggedout');
+    }
+  });
 
   $('.tabs').addEventListener('click', (e) => { const t = e.target.closest('[data-tab]'); if (t) selectTab(t.dataset.tab); });
   $('.tabs').addEventListener('keydown', (e) => {

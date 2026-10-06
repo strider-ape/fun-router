@@ -34,6 +34,7 @@ RADIOS = ('wlan0', 'wlan1')  # wlan0 = 5 GHz, wlan1 = 2.4 GHz on the OP2200H; re
 # the MAC filter's default action and its "Delete All" button are deliberately unreachable.
 ALLOWED_FORMS = {
     '/boaform/admin/formLogin': {'save'},
+    '/boaform/admin/formLogout': {'save'},
     '/boaform/admin/formFilter': {'addFilterMac', 'deleteSelFilterMac'},
     '/boaform/admin/formQosTraffictlEdit': set(),
     '/boaform/admin/formQosTraffictl': set(),
@@ -536,6 +537,15 @@ class RealtekBoa(base.Driver):
             except NotLoggedIn:
                 raise RouterError('The router did not accept that username and password')
             self.creds = (username, password)
+
+    def logout(self):
+        """End this computer's console session. Forgets the saved credentials first, so the
+        panel doesn't quietly log straight back in."""
+        with self.lock:
+            self.creds = None
+            self.post_form('/boaform/admin/formLogout', [
+                ('save', 'Logout'), ('submit-url', '/admin/logout.asp'),
+            ], referer='/admin/logout.asp', check_session=False)
 
     # --- Reads ---
 

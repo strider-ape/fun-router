@@ -108,6 +108,10 @@ class Driver:
         """Log in to the console. Raises RouterError if the router rejects the credentials."""
         raise NotImplementedError
 
+    def logout(self):
+        """End the console session and forget any saved credentials."""
+        raise NotImplementedError
+
     # Reads
     def status(self):
         """{model, firmware, uptime, cpu, memory, dns: [..], lan: {ip, mask, mac},
