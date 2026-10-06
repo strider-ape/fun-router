@@ -20,8 +20,13 @@ parts of router consoles into one friendly app, skipping the boring/critical stu
   - `realtek_boa.py` — the driver for Realtek "Boa" GPON ONTs (the OVT OP2200H). Holds
     the write allow-list, the `postSecurityFlag` checksum, and all page parsers.
   - `__init__.py` — the driver registry (`DRIVERS`, `make_driver`).
+- `usage.py` — usage history. A background recorder in `Panel` samples the driver's
+  `counters()` (whole connection) and station byte counters every 60 s and stores the
+  deltas in `usage.db` (SQLite, git-ignored). Counter resets (reboot, reconnect) count toward
+  totals but are flagged and excluded from peak speed. `/api/stats` and `/api/live`.
 - `web/` — the single-page app: `index.html`, `style.css`, `app.js` (tabs, views,
-  dialogs, polling), `explain.js` (the explainer text, keyed by id).
+  dialogs, polling), `explain.js` (the explainer text, keyed by id), `charts.js` (dependency-free
+  SVG charts; series colours validated with the dataviz validator for light and dark).
 - `config.json` — per-network config, **git-ignored** (router IP, driver, protect-list,
   interface names). `config.example.json` is the committed template.
 
@@ -29,7 +34,7 @@ Run: `py server.py` (Windows) / `python3 server.py` (macOS/Linux), then
 http://127.0.0.1:8787. Standard library only. `--lan --pin NNNN` exposes it to phones.
 
 Capabilities a driver can advertise: `devices, block, limit, internet, fibre, wifi,
-security, ping, traceroute`. The UI hides tabs/actions a driver doesn't support, so a
+security, ping, traceroute, usage`. The UI hides tabs/actions a driver doesn't support, so a
 future router with fewer features just shows fewer tabs.
 
 ## The network (specifics live in config.json, not here — this repo is public)

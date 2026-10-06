@@ -450,7 +450,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class RealtekBoa(base.Driver):
     family = 'Realtek Boa GPON ONT (OVT OP2200H and similar)'
     capabilities = frozenset({'devices', 'block', 'limit', 'internet', 'fibre', 'wifi', 'security',
-                              'ping', 'traceroute'})
+                              'ping', 'traceroute', 'usage'})
 
     def __init__(self, host):
         super().__init__(host)
@@ -594,6 +594,17 @@ class RealtekBoa(base.Driver):
                 'ports': parse_ports(self.get('/lan_port_status.asp')),
                 'interfaces': parse_interfaces(self.get('/stats.asp')),
             }
+
+    def counters(self):
+        """(bytes down, bytes up) through the fibre since boot. One small page, cheap to poll."""
+        stats = base.pairs(self.get('/admin/pon-stats.asp'))
+        down, up = base.to_int(stats.get('Bytes Received')), base.to_int(stats.get('Bytes Sent'))
+        return (down, up) if down is not None and up is not None else None
+
+    def optics(self):
+        """(rx dBm, tx dBm) of the fibre transceiver."""
+        s = base.pairs(self.get('/status_pon.asp'))
+        return base.number(s.get('Rx Power')), base.number(s.get('Tx Power'))
 
     def radios(self):
         found = []

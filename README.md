@@ -41,6 +41,10 @@ networks** only. On Linux with `ufw`, run `sudo ufw allow 8787/tcp`.
 
 - **Devices** — everyone on the network, where each is connected, live Wi-Fi speed
   and signal. Block, unblock, speed-limit or rename a device.
+- **Usage** — live speed of the whole connection, data used today / this week / this month
+  (download, upload or both), usage over time, top devices, share by device, an hour-by-weekday
+  heatmap, fun facts and fibre signal history. The router only counts since it last booted, so
+  fun-router records the history itself into `usage.db` (local, git-ignored) while it runs.
 - **Internet** — the connection (PPPoE, CGNAT detection), IPv4/IPv6, DNS, the fibre
   (GPON) optical levels with a health gauge, data used, and LAN port speeds.
 - **Wi-Fi** — each radio's channel, width, standard, power, security and WPS, plus a

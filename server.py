@@ -28,10 +28,13 @@ import time
 import urllib.parse
 
 from routers import NotLoggedIn, RouterError, make_driver
+from usage import UsageStore
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(HERE, 'web')
 NICKNAMES_FILE = os.path.join(HERE, 'nicknames.json')
+USAGE_FILE = os.path.join(HERE, 'usage.db')
+SAMPLE_EVERY = 60    # seconds between usage samples
 CONFIG_FILE = os.path.join(HERE, 'config.json')
 DEFAULT_CONFIG = {
     'router': '192.168.1.1',
@@ -203,6 +206,10 @@ class Panel:
         self.samples = {}     # mac -> (time, txBytes, rxBytes) for live speeds
         self.own_ip = own_ip(driver.host)
         self.diag = {'kind': None, 'host': None, 'started': 0, 'lines': [], 'done': True, 'same': 0}
+        self.usage = UsageStore(USAGE_FILE) if 'usage' in driver.capabilities else None
+        self.live = []          # [(time, down bit/s, up bit/s)] for the live graph, newest last
+        self.live_prev = None   # (time, down counter, up counter)
+        self.optics_at = 0
         try:
             with open(NICKNAMES_FILE, encoding='utf-8') as f:
                 self.nicknames = json.load(f)
@@ -349,6 +356,75 @@ class Panel:
             'updated': updated,
             'minLimitKbps': MIN_LIMIT_KBPS,
         }
+
+    # --- Usage recording ---
+
+    def start_recorder(self):
+        """Sample the router's counters every minute in the background (also keeps the session alive)."""
+        if not self.usage:
+            return
+        def loop():
+            pruned = 0
+            while True:
+                try:
+                    self._sample()
+                    if time.time() - pruned > 86400:
+                        self.usage.prune(time.time())
+                        pruned = time.time()
+                except (NotLoggedIn, RouterError, OSError):
+                    pass  # logged out or unreachable: this minute is simply not recorded
+                except Exception as e:  # never let a bad sample kill the recorder
+                    print('usage sample failed:', e)
+                time.sleep(SAMPLE_EVERY)
+        threading.Thread(target=loop, name='usage-recorder', daemon=True).start()
+
+    def _sample(self):
+        now = time.time()
+        wan = self.router.counters()
+        clients = self._clients()
+        stations, names = {}, {}
+        for radio_id, found in clients['stations'].items():
+            band = clients['radios'].get(radio_id, {}).get('band')
+            for mac, st in found.items():
+                if st['txBytes'] is not None and st['rxBytes'] is not None:
+                    stations[mac] = (st['txBytes'], st['rxBytes'])  # the AP's TX is the device's download
+                ip = (clients['dhcp'].get(mac) or {}).get('ip') or clients['arp'].get(mac)
+                name = self.nicknames.get(mac) or (self.hostnames.get(ip, (None,))[0] if ip else None)
+                names[mac] = (name, ip, band)
+        optics = None
+        if 'fibre' in self.router.capabilities and now - self.optics_at > 300:
+            optics = self.router.optics()
+            self.optics_at = now
+        self.usage.record(now, wan, stations, names, optics)
+
+    def stats(self, client_ip):
+        if not self.usage:
+            raise ValueError('This router has no usage counters')
+        if self.usage.boot_totals is None:
+            self.usage.boot_totals = self.router.counters()
+        out = self.usage.summary()
+        boot = self.usage.boot_totals
+        out['sinceBoot'] = {'down': boot[0], 'up': boot[1]} if boot else None
+        out['uptimeSeconds'] = _seconds(self._status().get('uptime'))
+        out['sampleEvery'] = SAMPLE_EVERY
+        return out
+
+    def live_rate(self, client_ip):
+        """Whole-connection speed right now, from two reads of the byte counters."""
+        if not self.usage:
+            raise ValueError('This router has no usage counters')
+        with self.lock:
+            now = time.time()
+            if not self.live_prev or now - self.live_prev[0] >= 1.5:  # several open pages share one read
+                counters = self.router.counters()
+                if counters:
+                    prev = self.live_prev
+                    self.live_prev = (now, counters[0], counters[1])
+                    if prev and counters[0] >= prev[1] and counters[1] >= prev[2]:
+                        secs = now - prev[0]
+                        self.live.append((now, (counters[0] - prev[1]) * 8 / secs, (counters[1] - prev[2]) * 8 / secs))
+                        del self.live[:-200]
+            return {'points': [{'t': t, 'down': d, 'up': u} for t, d, u in self.live]}
 
     # --- Internet, Wi-Fi and security views (read-only) ---
 
@@ -693,6 +769,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '/api/wifi': self.panel.wifi,
             '/api/security': self.panel.security,
             '/api/diag': self.panel.diag_poll,
+            '/api/stats': self.panel.stats,
+            '/api/live': self.panel.live_rate,
         }
         if path in views:
             if self._allowed(api=True):
@@ -737,6 +815,7 @@ def main():
     config = load_config()
     mimetypes.add_type('application/javascript', '.js')
     Handler.panel = Panel(make_driver(config['driver'], config['router']), config)
+    Handler.panel.start_recorder()
     Handler.pin = args.pin
     bind = '0.0.0.0' if args.lan else '127.0.0.1'
     lan_ip = Handler.panel.own_ip

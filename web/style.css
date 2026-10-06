@@ -437,6 +437,115 @@ fieldset.rate legend { margin-bottom: 10px; padding: 0; }
 }
 .toast.bad { background: var(--red); }
 
+/* ---------- Charts ----------
+   Series colours are validated (dataviz validator) separately for each surface:
+   light against #FFFFFF, dark against #221F19. Fixed order, never cycled.
+   Download = slot 1 (blue), upload = slot 2 (orange). Text never uses series colours. */
+:root {
+  --c1: #2F6FD8; --c2: #E8692A; --c3: #1E9E57; --c4: #7A4BD6; --c5: #B58A12; --c6: #D6337F;
+  --c-other: #A39D92;
+  --seq-0: #F1ECE2; --seq-1: #D3E2FA; --seq-2: #A6C4F4; --seq-3: #739FEB; --seq-4: #3F79DE; --seq-5: #2253AE;
+  --chart-grid: rgba(18, 18, 18, 0.10);
+  --chart-axis: #6E685F;
+  --tip-bg: #121212; --tip-text: #FFF6E6;
+}
+:root[data-theme="dark"] {
+  --c1: #5590EE; --c2: #DA6E33; --c3: #2A9F60; --c4: #9570EA; --c5: #AF8420; --c6: #DE4189;
+  --c-other: #7D766A;
+  --seq-0: #2B2822; --seq-1: #2C3A57; --seq-2: #2F4E86; --seq-3: #3866B8; --seq-4: #5B8EE6; --seq-5: #98BCF6;
+  --chart-grid: rgba(241, 233, 218, 0.10);
+  --chart-axis: #A89F8D;
+  --tip-bg: #F1E9DA; --tip-text: #15130F;
+}
+.chart { width: 100%; min-height: 60px; }
+.chart-svg { display: block; overflow: visible; }
+.chart-svg .grid { stroke: var(--chart-grid); stroke-width: 1; }
+.chart-svg .baseline { stroke: var(--ink); stroke-width: 2; }
+.chart-svg .axis-label { fill: var(--chart-axis); font: 500 12px var(--body); font-variant-numeric: tabular-nums; }
+.chart-svg .hit, .chart-svg .hit-area { fill: transparent; }
+.chart-svg .bar-missing { fill: none; stroke: var(--chart-grid); stroke-width: 2; stroke-dasharray: 4 4; }
+.chart-svg .s-down { fill: var(--c1); stroke: var(--c1); }
+.chart-svg .s-up { fill: var(--c2); stroke: var(--c2); }
+.chart-svg .cat-1 { fill: var(--c1); stroke: var(--c1); } .chart-svg .cat-2 { fill: var(--c2); stroke: var(--c2); }
+.chart-svg .cat-3 { fill: var(--c3); stroke: var(--c3); } .chart-svg .cat-4 { fill: var(--c4); stroke: var(--c4); }
+.chart-svg .cat-5 { fill: var(--c5); stroke: var(--c5); } .chart-svg .cat-6 { fill: var(--c6); stroke: var(--c6); }
+.chart-svg .cat-other { fill: var(--c-other); stroke: var(--c-other); }
+.chart-svg path.slice { stroke: var(--card); stroke-width: 2; }
+.chart-svg .line { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; }
+.chart-svg .area { stroke: none; fill-opacity: 0.16; }
+.chart-svg .dot { stroke: var(--card); stroke-width: 2.5; }
+.chart-svg .crosshair { stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 3 3; }
+.chart-svg .ref { stroke: var(--dot-alert); stroke-width: 2; stroke-dasharray: 6 4; }
+.chart-svg .ref-label { fill: var(--text); font: 700 12px var(--body); paint-order: stroke; stroke: var(--card); stroke-width: 5px; stroke-linejoin: round; }
+.chart-svg .donut-empty { stroke: var(--chart-grid); }
+.chart-svg .donut-big { fill: var(--text); font: 400 26px var(--display); }
+.chart-svg .donut-small { fill: var(--muted); font: 700 12px var(--body); letter-spacing: 0.06em; text-transform: uppercase; }
+.chart-svg [class^="seq-"] { stroke: none; }
+.chart-svg .seq-0 { fill: var(--seq-0); } .chart-svg .seq-1 { fill: var(--seq-1); } .chart-svg .seq-2 { fill: var(--seq-2); }
+.chart-svg .seq-3 { fill: var(--seq-3); } .chart-svg .seq-4 { fill: var(--seq-4); } .chart-svg .seq-5 { fill: var(--seq-5); }
+.chart-empty { margin: 0; padding: 40px 0; text-align: center; color: var(--muted); font: 500 15px var(--body); }
+.chart-tip {
+  position: fixed; z-index: 60; display: none; pointer-events: none; max-width: 280px;
+  padding: 9px 12px; background: var(--tip-bg); color: var(--tip-text); border-radius: 10px;
+  font: 500 13px/1.45 var(--body); font-variant-numeric: tabular-nums; box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.25);
+}
+.chart-tip-head { font-weight: 700; margin-bottom: 2px; }
+
+/* Legend: a swatch beside text; the text stays in ink, never the series colour */
+.chart-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font: 600 13.5px/1.3 var(--body); }
+.chart-legend span { display: inline-flex; align-items: center; gap: 8px; }
+.sw { width: 14px; height: 14px; flex: none; border-radius: 4px; }
+.sw.s-down, .sw.cat-1 { background: var(--c1); } .sw.s-up, .sw.cat-2 { background: var(--c2); }
+.sw.cat-3 { background: var(--c3); } .sw.cat-4 { background: var(--c4); } .sw.cat-5 { background: var(--c5); }
+.sw.cat-6 { background: var(--c6); } .sw.cat-other { background: var(--c-other); }
+.sw.missing { background: transparent; border: 2px dashed var(--chart-axis); }
+.seq-legend { display: flex; align-items: center; gap: 6px; font: 600 12.5px var(--body); color: var(--muted); }
+.seq-legend i { width: 18px; height: 14px; border-radius: 3px; }
+
+/* ---------- Usage page ---------- */
+.usage-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 26px; }
+.usage-controls .chips { display: flex; flex-wrap: wrap; gap: 10px; }
+.usage-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 20px; margin-bottom: 30px; }
+.u-tile {
+  display: grid; gap: 6px; align-content: start; min-width: 0; padding: 16px 18px; text-align: left;
+  background: var(--card); color: var(--text);
+  border: var(--b) solid var(--ink); border-radius: var(--r); box-shadow: var(--shadow-md);
+}
+button.u-tile { cursor: pointer; }
+.u-tile[aria-pressed="true"] { background: var(--yellow); color: var(--on-accent); }
+.u-tile .label { color: inherit; }
+.u-tile b { font: 400 34px/1.05 var(--display); overflow-wrap: anywhere; }
+.u-split { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 700 14px/1.3 var(--mono); }
+.u-note { font: 500 12.5px/1.4 var(--body); opacity: 0.8; }
+.big-live { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: baseline; }
+.big-live div { display: grid; gap: 2px; }
+.big-live b { font: 400 clamp(1.9rem, 4.5vw, 2.6rem)/1 var(--display); font-variant-numeric: tabular-nums; }
+.dev-rows { display: grid; gap: 12px; }
+.dev-row { display: grid; grid-template-columns: minmax(110px, 30%) 1fr auto; align-items: center; gap: 12px; }
+.dev-row .who { display: grid; min-width: 0; }
+.dev-row .who b { font: 700 15px/1.25 var(--body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev-row .who small { font: 500 12px/1.3 var(--mono); color: var(--muted); }
+.dev-row .track { height: 16px; border-radius: 6px; background: var(--seq-0); overflow: hidden; display: flex; gap: 2px; }
+.dev-row .track span { height: 100%; border-radius: 0 6px 6px 0; }
+.track .cat-1 { background: var(--c1); } .track .cat-2 { background: var(--c2); } .track .cat-3 { background: var(--c3); }
+.track .cat-4 { background: var(--c4); } .track .cat-5 { background: var(--c5); } .track .cat-6 { background: var(--c6); }
+.track .cat-other { background: var(--c-other); } .track .s-down { background: var(--c1); } .track .s-up { background: var(--c2); }
+.dev-row .amt { font: 700 14px/1 var(--mono); text-align: right; white-space: nowrap; }
+.donut-wrap { display: flex; flex-wrap: wrap; gap: 20px 28px; align-items: center; }
+.donut-wrap .chart { width: auto; flex: 0 0 auto; }
+.donut-wrap .chart-legend { flex: 1 1 200px; display: grid; gap: 10px; }
+.donut-wrap .chart-legend span { justify-content: space-between; gap: 12px; }
+.donut-wrap .chart-legend em { font: 700 13px var(--mono); font-style: normal; color: var(--muted); }
+.facts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+.fact { padding: 14px 16px; background: var(--field); border: 2.5px solid var(--ink); border-radius: 12px; display: grid; gap: 4px; }
+.fact b { font: 400 22px/1.15 var(--display); overflow-wrap: anywhere; }
+.fact small { font: 500 13px/1.4 var(--body); color: var(--muted); }
+.data-table { width: 100%; border-collapse: collapse; font: 500 14px/1.4 var(--body); font-variant-numeric: tabular-nums; }
+.data-table th, .data-table td { padding: 7px 10px; border-bottom: 2px dashed var(--chart-grid); text-align: right; }
+.data-table th:first-child, .data-table td:first-child { text-align: left; }
+.data-table th { font: 700 12px var(--body); letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+.table-wrap { max-height: 320px; overflow: auto; }
+
 /* ---------- Small screens ---------- */
 @media (max-width: 640px) {
   .wrap { padding: 24px 16px 56px; }

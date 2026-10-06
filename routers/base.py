@@ -95,7 +95,7 @@ class Driver:
     in `capabilities`; the panel hides features a router doesn't have. Methods for
     missing capabilities can be left unimplemented.
 
-    Capabilities: devices, block, limit, internet, fibre, wifi, security, ping, traceroute.
+    Capabilities: devices, block, limit, internet, fibre, wifi, security, ping, traceroute, usage.
     """
 
     family = 'Unknown router'
@@ -133,6 +133,15 @@ class Driver:
 
     def internet(self):
         """{ipv6: {...}, fibre: {...} | None, ports: [...], interfaces: [...]}"""
+        raise NotImplementedError
+
+    def counters(self):
+        """(bytes down, bytes up) for the whole internet connection since boot, or None.
+        Needed for the 'usage' capability; called about once a minute and for the live graph."""
+        raise NotImplementedError
+
+    def optics(self):
+        """(rx dBm, tx dBm) for fibre routers ('fibre' capability)."""
         raise NotImplementedError
 
     def radios(self):

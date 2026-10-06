@@ -40,6 +40,7 @@
   <div class="tabbar">
     <nav class="tabs" role="tablist" aria-label="Sections">
       <button class="tab" role="tab" id="tab-devices" data-tab="devices" aria-controls="view-devices">Devices</button>
+      <button class="tab" role="tab" id="tab-usage" data-tab="usage" aria-controls="view-usage">Usage</button>
       <button class="tab" role="tab" id="tab-internet" data-tab="internet" aria-controls="view-internet">Internet</button>
       <button class="tab" role="tab" id="tab-wifi" data-tab="wifi" aria-controls="view-wifi">Wi-Fi</button>
       <button class="tab" role="tab" id="tab-security" data-tab="security" aria-controls="view-security">Security <span class="count" id="sec-count" hidden></span></button>
@@ -64,6 +65,10 @@
         <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
       </div>
       <div id="stale"></div>
+    </section>
+
+    <section id="view-usage" role="tabpanel" aria-labelledby="tab-usage" hidden>
+      <div id="usage"><div class="skeleton"></div></div>
     </section>
 
     <section id="view-internet" role="tabpanel" aria-labelledby="tab-internet" hidden>
@@ -169,6 +174,7 @@
 <div class="toasts" id="toasts" aria-live="polite"></div>
 
 <script src="explain.js"></script>
+<script src="charts.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

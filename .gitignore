@@ -12,3 +12,7 @@ claude-session/
 CLAUDE.local.md
 .claude/settings.local.json
 .env
+
+# Local usage history recorded by the panel
+usage.db
+usage.db-journal

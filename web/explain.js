@@ -221,6 +221,36 @@
       effect: READING,
     },
 
+    /* ---------- Usage ---------- */
+    'usage.recording': {
+      title: 'Where these numbers come from',
+      what: 'The router only keeps byte counters since it last started: one pair for the whole fibre connection, and one per Wi-Fi device while it stays connected. fun-router reads them about once a minute and stores the difference between readings in a local file (usage.db). Today, this week and this month are sums of those differences, in your computer\'s local time.',
+      change: 'History only exists for minutes when fun-router was running and could read the router; gaps show as dashed bars and the coverage note says how much was recorded. "Since router restart" is always exact, because it is the router\'s own counter. Sizes use GB = 1,000,000,000 bytes, the way ISPs count.',
+      example: (c) => c && c.since ? `Recording since <code>${v(c.since)}</code>.` : 'Recording starts the first time fun-router reads the router.',
+      effect: READING,
+    },
+    'usage.live': {
+      title: 'Live speed',
+      what: 'Every 2 seconds the page reads the fibre interface\'s byte counters and divides the change by the time between reads. That is the speed of your whole connection right now, all devices together, in megabits per second (1 byte = 8 bits).',
+      change: 'Short spikes are normal: pages and apps download in bursts. A plateau near your plan\'s speed means something is saturating the line (a big download, a backup, a 4K stream).',
+      example: 'A 4K stream sits around 15–25 Mb/s; a video call around 2–4 Mb/s each way; a game download can take the whole line.',
+      effect: READING,
+    },
+    'usage.devices': {
+      title: 'Usage per device',
+      what: 'Devices on the main router\'s own Wi-Fi each have byte counters (how much the router sent to and received from that device). Devices on a cable or the upstairs access point share the router\'s LAN port, so the router can\'t split them; they appear together as "Cable & access point", which is the whole connection minus the Wi-Fi devices.',
+      change: 'Wi-Fi counters also include traffic between your own devices (casting to a TV, file copies), so the device split is an estimate of internet use, while the totals are exact. A phone that switches to a new random MAC starts a new entry.',
+      example: 'If the connection used 10 GB and Wi-Fi devices account for 6 GB, the remaining 4 GB came from the access point and wired devices.',
+      effect: READING,
+    },
+    'usage.heatmap': {
+      title: 'When you use the internet',
+      what: 'Each square is one hour of one weekday, summed over the last 4 weeks. Darker means more data moved in that hour.',
+      change: 'Patterns show routines: evening streaming, overnight backups or updates, weekend gaming. A dark square at 3 am you don\'t recognise is worth a look on the Devices tab.',
+      example: (c) => c && c.busiest ? `Your busiest slot so far is <code>${v(c.busiest)}</code>.` : '',
+      effect: READING,
+    },
+
     /* ---------- Tools ---------- */
     'tool.ping': {
       title: 'Ping',

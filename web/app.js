@@ -8,7 +8,7 @@
   };
 
   const POLL_MS = 10000;
-  const TABS = ['devices', 'internet', 'wifi', 'security', 'tools'];
+  const TABS = ['devices', 'usage', 'internet', 'wifi', 'security', 'tools'];
   const PRESETS = [0, 0.5, 1, 2, 5, 10];
   const BAND_COLOR = { '5': 'c-blue', '2.4': 'c-green' };
   const LOCK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
@@ -109,8 +109,11 @@
   function selectTab(name) {
     if (!TABS.includes(name)) name = 'devices';
     clearInterval(diagTimer);  // stop any ping/traceroute poll when leaving its view; renderTools resumes it
+    clearInterval(liveTimer);
+    if (window.Charts) Charts.hideTip();
     tab = name;
     store.set('frTab', name);
+    if (location.hash !== '#' + name) history.replaceState(null, '', '#' + name);  // deep link: /#usage
     for (const t of TABS) {
       const on = t === name;
       $('#tab-' + t).setAttribute('aria-selected', String(on));
@@ -122,13 +125,14 @@
 
   const LOADERS = {
     devices: () => api('/api/state'),
+    usage: () => api('/api/stats'),
     internet: () => api('/api/internet'),
     wifi: () => api('/api/wifi'),
     security: () => api('/api/security'),
     tools: async () => ({}),
   };
   const RENDERERS = {
-    devices: renderDevices, internet: renderInternet, wifi: renderWifi,
+    devices: renderDevices, usage: renderUsage, internet: renderInternet, wifi: renderWifi,
     security: renderSecurity, tools: renderTools,
   };
 
@@ -141,6 +145,7 @@
         const changed = caps.join() !== (payload.capabilities || []).join();
         caps = payload.capabilities || [];
         applyCaps();
+        renderHero(payload.router);  // keep the header current whichever tab is open
         // Caps arrive with the devices state. If another tab is active and was drawn
         // before caps loaded (e.g. the page opened straight onto Tools), redraw it now.
         if (changed && tab !== 'devices') {
@@ -163,12 +168,13 @@
     $('#tab-wifi').hidden = !caps.includes('wifi');
     $('#tab-security').hidden = !caps.includes('security');
     $('#tab-internet').hidden = !caps.includes('internet');
+    $('#tab-usage').hidden = !caps.includes('usage');
     // A restored tab may belong to a capability this router lacks; fall back to Devices.
     if ($('#tab-' + tab).hidden) selectTab('devices');
   }
 
   function renderEmpty(name, msg) {
-    const host = { devices: '#grid', internet: '#internet', wifi: '#wifi', security: '#security', tools: '#tools' }[name];
+    const host = { devices: '#grid', usage: '#usage', internet: '#internet', wifi: '#wifi', security: '#security', tools: '#tools' }[name];
     $(host).innerHTML = `<div class="empty">${esc(msg)}</div>`;
   }
 
@@ -311,6 +317,253 @@
       </div>
       ${actions ? `<div class="card-foot">${actions}</div>` : ''}
     </article>`;
+  }
+
+  // --- Usage ---
+  // Sizes use decimal units (1 GB = 10^9 bytes), the way ISPs count data.
+  function fmtBytes(n) {
+    if (n == null) return '—';
+    const units = [[1e12, 'TB'], [1e9, 'GB'], [1e6, 'MB'], [1e3, 'KB']];
+    for (const [size, unit] of units) {
+      if (n >= size) { const v = n / size; return (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + ' ' + unit; }
+    }
+    return Math.round(n) + ' B';
+  }
+  function fmtRate(bps) {
+    if (bps == null) return '—';
+    const m = bps / 1e6;
+    return (m >= 100 ? m.toFixed(0) : m >= 10 ? m.toFixed(1) : m.toFixed(2)) + ' Mb/s';
+  }
+  const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const fmtClock = (ts, sec) => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: sec ? '2-digit' : undefined });
+  const fmtDay = (ts) => new Date(ts * 1000).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+  const RANGE_LABEL = { today: 'Today', week: 'This week', month: 'This month' };
+
+  let usageRange = store.get('frRange') || 'today';
+  let usageDir = store.get('frDir') || 'both';
+  let usageTable = false;
+  let liveTimer = null;
+  let livePoints = [];
+  const dirVal = (o) => (usageDir === 'down' ? o.down : usageDir === 'up' ? o.up : o.down + o.up);
+  const dirWord = () => (usageDir === 'down' ? 'downloaded' : usageDir === 'up' ? 'uploaded' : 'used');
+
+  function coverageNote(r) {
+    if (!r.coveredSecs) return 'Not recorded yet';
+    const pct = Math.min(100, Math.round((100 * r.coveredSecs) / r.elapsedSecs));
+    return pct >= 99 ? 'Fully recorded' : `Recorded ${duration(r.coveredSecs)} of ${duration(r.elapsedSecs)} (${pct}%)`;
+  }
+
+  // Colour follows the device, never its rank in the current view: slots are handed out
+  // once from this month's ranking, so a device keeps its colour on every range.
+  function entityColors(s) {
+    const m = s.ranges.month;
+    const all = [...m.devices.map((d) => ({ key: d.mac, total: d.down + d.up })), { key: '__lan', total: m.otherDown + m.otherUp }]
+      .sort((a, b) => b.total - a.total);
+    const map = {};
+    all.forEach((e, i) => { map[e.key] = i < 6 ? 'cat-' + (i + 1) : 'cat-other'; });
+    return (key) => map[key] || 'cat-other';
+  }
+
+  function usageEntities(r) {
+    return [
+      ...r.devices.map((d) => ({ key: d.mac, name: d.name || d.ip || d.mac, sub: [d.band ? d.band + ' GHz Wi-Fi' : 'Wi-Fi', d.ip].filter(Boolean).join(' · '), down: d.down, up: d.up })),
+      { key: '__lan', name: 'Cable & access point', sub: 'Everything not on the router\'s Wi-Fi', down: r.otherDown, up: r.otherUp },
+    ].filter((e) => e.down + e.up > 0).sort((a, b) => dirVal(b) - dirVal(a));
+  }
+
+  function renderUsage(s) {
+    const r = s.ranges[usageRange];
+    const colorOf = entityColors(s);
+    const boot = s.sinceBoot;
+    const tile = (key) => {
+      const x = s.ranges[key];
+      return `<button class="u-tile" type="button" data-range="${key}" aria-pressed="${usageRange === key}">
+        <span class="label">${RANGE_LABEL[key]}</span>
+        <b>${esc(fmtBytes(dirVal(x)))}</b>
+        <span class="u-split"><span>↓ ${esc(fmtBytes(x.down))}</span><span>↑ ${esc(fmtBytes(x.up))}</span></span>
+        <span class="u-note">${esc(coverageNote(x))}</span>
+      </button>`;
+    };
+    const bootTile = boot ? `<div class="u-tile">
+        <span class="label">Since router restart</span>
+        <b>${esc(fmtBytes(dirVal(boot)))}</b>
+        <span class="u-split"><span>↓ ${esc(fmtBytes(boot.down))}</span><span>↑ ${esc(fmtBytes(boot.up))}</span></span>
+        <span class="u-note">Exact, from the router${s.uptimeSeconds ? ' · up ' + esc(duration(s.uptimeSeconds)) : ''}</span>
+      </div>` : '';
+    const chip = (attr, key, label, cur) => `<button class="chip" type="button" data-${attr}="${key}" aria-pressed="${cur === key}">${label}</button>`;
+
+    const ents = usageEntities(r);
+    const shown = ents.slice(0, 8);
+    const rest = ents.slice(8);
+    if (rest.length) shown.push({ key: '__rest', name: `${rest.length} more device${rest.length === 1 ? '' : 's'}`, sub: 'Smaller users combined', down: rest.reduce((a, e) => a + e.down, 0), up: rest.reduce((a, e) => a + e.up, 0) });
+    const maxEnt = Math.max(1, ...shown.map(dirVal));
+    const devRows = shown.length ? shown.map((e) => `<div class="dev-row" title="↓ ${esc(fmtBytes(e.down))}  ↑ ${esc(fmtBytes(e.up))}">
+        <span class="who"><b>${esc(e.name)}</b><small>${esc(e.sub)}</small></span>
+        <span class="track"><span class="${e.key === '__rest' ? 'cat-other' : colorOf(e.key)}" style="width:${Math.max(1, (dirVal(e) / maxEnt) * 100)}%"></span></span>
+        <span class="amt">${esc(fmtBytes(dirVal(e)))}</span>
+      </div>`).join('') : '<p class="chart-empty">No per-device data for this range yet.</p>';
+
+    // Donut: top 5 entities by colour, the rest folded into "Other"
+    const top5 = ents.slice(0, 5);
+    const others = ents.slice(5);
+    const slices = top5.map((e) => ({ key: e.key, label: e.name, v: dirVal(e), cls: colorOf(e.key) }));
+    if (others.length) slices.push({ key: '__rest', label: 'Other devices', v: others.reduce((a, e) => a + dirVal(e), 0), cls: 'cat-other' });
+    const totalSlices = slices.reduce((a, x) => a + x.v, 0);
+    slices.forEach((x) => { x.tip = [x.label, `${fmtBytes(x.v)} ${dirWord()}`, `${totalSlices ? Math.round((100 * x.v) / totalSlices) : 0}% of ${RANGE_LABEL[usageRange].toLowerCase()}`]; });
+
+    // Heatmap busiest slot and other fun facts
+    let busiest = null;
+    s.heatmap.forEach((row, d) => row.forEach((v, h) => { if (v > 0 && (!busiest || v > busiest.v)) busiest = { d, h, v }; }));
+    const busiestText = busiest ? `${DAYS[busiest.d]} ${String(busiest.h).padStart(2, '0')}:00–${String((busiest.h + 1) % 24).padStart(2, '0')}:00` : null;
+    const bigBucket = r.buckets.reduce((best, b) => (dirVal(b) > (best ? dirVal(best) : 0) ? b : best), null);
+    const bigDay = s.daily.reduce((best, b) => (dirVal(b) > (best ? dirVal(best) : 0) ? b : best), null);
+    const avgSpeed = r.coveredSecs ? ((r.down + r.up) * 8) / r.coveredSecs : null;
+    const fact = (label, value, note) => `<div class="fact"><span class="label">${esc(label)}</span><b>${esc(value)}</b><small>${esc(note)}</small></div>`;
+    const facts = [
+      fact('Fastest minute', r.peak ? fmtRate(r.peak.downBps) + ' ↓' : '—', r.peak ? `${fmtDay(r.peak.ts)}, ${fmtClock(r.peak.ts)} · ${fmtRate(r.peak.upBps)} up` : 'Needs a few minutes of recording'),
+      fact(usageRange === 'today' ? 'Busiest hour' : 'Busiest day', bigBucket ? fmtBytes(dirVal(bigBucket)) : '—',
+        bigBucket ? (usageRange === 'today' ? `${fmtClock(bigBucket.t)}–${fmtClock(bigBucket.t + 3600)}` : fmtDay(bigBucket.t)) : 'Not enough data yet'),
+      fact('Download : upload', r.up ? `${(r.down / r.up).toFixed(1)} : 1` : '—', r.up ? `For every byte sent, ${(r.down / r.up).toFixed(1)} came in` : 'No upload recorded yet'),
+      fact('Average speed', avgSpeed != null ? fmtRate(avgSpeed) : '—', 'Across the recorded time in this range'),
+      fact('Top user', ents[0] ? ents[0].name : '—', ents[0] ? `${fmtBytes(dirVal(ents[0]))} ${dirWord()}` : 'No device data yet'),
+      fact('Biggest day (30 days)', bigDay ? fmtBytes(dirVal(bigDay)) : '—', bigDay ? fmtDay(bigDay.t) : 'Not enough data yet'),
+      fact('Usual busy slot', busiestText || '—', busiestText ? 'Hour with the most data, last 4 weeks' : 'Builds up over a few days'),
+      fact('Recording since', s.recordingSince ? fmtDay(s.recordingSince) : 'Just started', s.recordingSince ? fmtClock(s.recordingSince) : 'First numbers in about a minute'),
+    ].join('');
+
+    const legendDir = [usageDir !== 'up' ? '<span><i class="sw s-down"></i>Download</span>' : '', usageDir !== 'down' ? '<span><i class="sw s-up"></i>Upload</span>' : '', '<span><i class="sw missing"></i>Not recorded</span>'].join('');
+    const per = usageRange === 'today' ? 'per hour' : 'per day';
+    const tableRows = r.buckets.filter((b) => b.t <= s.now).map((b) => `<tr><td>${esc(usageRange === 'today' ? fmtClock(b.t) : fmtDay(b.t))}</td><td>${esc(fmtBytes(b.down))}</td><td>${esc(fmtBytes(b.up))}</td><td>${b.covered ? Math.min(100, Math.round((100 * b.covered) / (usageRange === 'today' ? 3600 : 86400))) + '%' : '—'}</td></tr>`).join('');
+
+    const empty = !s.recordingSince ? `<div class="banner show" style="background:var(--blue)"><p>Recording just started. The first numbers appear in about a minute, the first bar within the hour, and the weekly views fill in as fun-router keeps running.</p></div>` : '';
+
+    $('#usage').innerHTML = `${empty}
+      <div class="usage-controls">
+        <div class="chips" role="group" aria-label="Time range">${chip('range', 'today', 'Today', usageRange)}${chip('range', 'week', 'This week', usageRange)}${chip('range', 'month', 'This month', usageRange)}</div>
+        <div class="chips" role="group" aria-label="Direction">${chip('dir', 'both', 'Both', usageDir)}${chip('dir', 'down', '↓ Download', usageDir)}${chip('dir', 'up', '↑ Upload', usageDir)}</div>
+      </div>
+      <div class="usage-tiles">${tile('today')}${tile('week')}${tile('month')}${bootTile}</div>
+      <div class="cards">
+        ${card({ title: 'Live speed', sub: 'Whole connection, updated every 2 seconds', color: 'c-yellow', wide: true,
+          status: '<span class="pill busy" id="live-pill">Live</span>',
+          body: `<div class="big-live">
+              <div><span class="label">Download now</span><b id="live-down">—</b></div>
+              <div><span class="label">Upload now</span><b id="live-up">—</b></div>
+              <div><span class="label">Fastest this visit</span><b id="live-peak">—</b></div>
+            </div>
+            <div class="chart" id="ch-live"></div>
+            <div class="chart-legend"><span><i class="sw s-down"></i>Download</span><span><i class="sw s-up"></i>Upload</span></div>
+            <div>${why('usage.live')}${whyPanel('usage.live')}</div>` })}
+        ${card({ title: 'Usage over time', sub: `${RANGE_LABEL[usageRange]}, ${per}`, color: 'c-blue', wide: true,
+          status: pill(`${fmtBytes(dirVal(r))} ${dirWord()}`),
+          body: `<div class="chart-legend">${legendDir}</div>
+            <div class="chart" id="ch-bars"></div>
+            <div class="btn-row"><button class="btn sm" type="button" data-table aria-expanded="${usageTable}">${usageTable ? 'Hide table' : 'Show as table'}</button></div>
+            ${usageTable ? `<div class="table-wrap"><table class="data-table"><thead><tr><th>${usageRange === 'today' ? 'Hour' : 'Day'}</th><th>Download</th><th>Upload</th><th>Recorded</th></tr></thead><tbody>${tableRows || '<tr><td colspan="4">No data yet</td></tr>'}</tbody></table></div>` : ''}
+            <div>${why('usage.recording')}${whyPanel('usage.recording', { since: s.recordingSince ? `${fmtDay(s.recordingSince)} ${fmtClock(s.recordingSince)}` : null })}</div>` })}
+        ${card({ title: 'Top devices', sub: `${RANGE_LABEL[usageRange]}, data ${dirWord()}`, color: 'c-green',
+          status: ents.length ? pill(`${ents.length} active`) : '',
+          body: `<div class="dev-rows">${devRows}</div><div>${why('usage.devices')}${whyPanel('usage.devices')}</div>` })}
+        ${card({ title: 'Who used what share', sub: `${RANGE_LABEL[usageRange]}, ${usageDir === 'both' ? 'download + upload' : usageDir === 'down' ? 'download' : 'upload'}`, color: 'c-pink',
+          body: `<div class="donut-wrap"><div class="chart" id="ch-donut"></div>
+            <div class="chart-legend">${slices.length ? slices.map((x) => `<span><span style="display:inline-flex;align-items:center;gap:8px;min-width:0"><i class="sw ${x.cls}"></i>${esc(x.label)}</span><em>${totalSlices ? Math.round((100 * x.v) / totalSlices) : 0}%</em></span>`).join('') : '<span class="muted">No data for this range yet</span>'}</div></div>` })}
+        ${card({ title: 'When you use the internet', sub: 'Last 4 weeks, by weekday and hour', color: 'c-lilac', wide: true,
+          body: `<div class="chart" id="ch-heat"></div>
+            <div class="seq-legend">Less <i style="background:var(--seq-1)"></i><i style="background:var(--seq-2)"></i><i style="background:var(--seq-3)"></i><i style="background:var(--seq-4)"></i><i style="background:var(--seq-5)"></i> More</div>
+            <div>${why('usage.heatmap')}${whyPanel('usage.heatmap', { busiest: busiestText })}</div>` })}
+        ${card({ title: 'Fun facts', sub: RANGE_LABEL[usageRange], color: 'c-orange', wide: true, body: `<div class="facts-grid">${facts}</div>` })}
+        ${s.optics.length ? card({ title: 'Fibre signal', sub: 'Receive power, last 7 days', color: 'c-grey', wide: true,
+          body: `<div class="chart" id="ch-optics"></div><div>${why('fibre.rx', 'What this level means')}${whyPanel('fibre.rx', { rx: s.optics[s.optics.length - 1].rx }, 'fibre.rx:usage')}</div>` }) : ''}
+      </div>`;
+
+    // Draw the charts now that their containers exist and have a width
+    const hourLabel = (t) => String(new Date(t * 1000).getHours()).padStart(2, '0');
+    const span = usageRange === 'today' ? 3600 : 86400;
+    Charts.draw('ch-bars', 'bars', {
+      ariaLabel: `Data ${dirWord()} ${per}`,
+      fmt: fmtBytes,
+      every: usageRange === 'month' ? 3 : usageRange === 'today' ? 3 : 1,
+      buckets: r.buckets.map((b) => {
+        const future = b.t > s.now;
+        const missing = !future && !b.covered && !(b.down + b.up);
+        const head = usageRange === 'today' ? `${fmtClock(b.t)}–${fmtClock(b.t + 3600)}` : fmtDay(b.t);
+        return {
+          label: usageRange === 'today' ? hourLabel(b.t) : usageRange === 'week' ? DAYS[(new Date(b.t * 1000).getDay() + 6) % 7] : String(new Date(b.t * 1000).getDate()),
+          state: future ? 'future' : missing ? 'missing' : 'ok',
+          segments: future ? [] : usageDir === 'up' ? [{ v: b.up, cls: 's-up' }] : usageDir === 'down' ? [{ v: b.down, cls: 's-down' }] : [{ v: b.down, cls: 's-down' }, { v: b.up, cls: 's-up' }],
+          tip: future ? [head, 'Still to come'] : missing ? [head, 'Not recorded (fun-router wasn\'t running or couldn\'t read the router)']
+            : [head, `↓ ${fmtBytes(b.down)} downloaded`, `↑ ${fmtBytes(b.up)} uploaded`, `Recorded ${Math.min(100, Math.round((100 * b.covered) / span))}% of this ${usageRange === 'today' ? 'hour' : 'day'}`],
+        };
+      }),
+    });
+    Charts.draw('ch-donut', 'donut', {
+      ariaLabel: 'Share of data by device',
+      slices,
+      center: [fmtBytes(totalSlices), dirWord()],
+    });
+    Charts.draw('ch-heat', 'heat', {
+      ariaLabel: 'Data by weekday and hour over the last 4 weeks',
+      grid: s.heatmap,
+      rows: DAYS,
+      cols: Array.from({ length: 24 }, (_, h) => (h % 3 === 0 ? String(h).padStart(2, '0') : '')),
+      tip: (d, h, v) => [`${DAYS[d]} ${String(h).padStart(2, '0')}:00–${String((h + 1) % 24).padStart(2, '0')}:00`, v ? `${fmtBytes(v)} over 4 weeks` : 'Nothing recorded'],
+    });
+    if (s.optics.length) {
+      const rx = s.optics.map((o) => o.rx).filter((x) => x != null);
+      Charts.draw('ch-optics', 'lines', {
+        ariaLabel: 'Fibre receive power over the last 7 days',
+        points: s.optics.map((o) => ({ t: o.t, values: [o.rx] })),
+        series: [{ cls: 's-down' }],
+        yMin: Math.floor(Math.min(...rx, -28)), yMax: Math.ceil(Math.max(...rx) + 1),
+        ref: { v: -27, label: 'Class B+ limit, −27 dBm' },
+        maxGap: 1800,
+        fmt: (v) => v.toFixed(1) + ' dBm',
+        xfmt: (t) => fmtDay(t),
+        tip: (p) => [`${fmtDay(p.t)}, ${fmtClock(p.t)}`, `${p.values[0].toFixed(2)} dBm received`],
+        emptyText: 'Fibre readings start appearing after a few minutes.',
+      });
+    }
+    drawLive();
+    startLive();
+  }
+
+  function drawLive() {
+    if (!$('#ch-live')) return;
+    const pts = livePoints;
+    const last = pts[pts.length - 1];
+    $('#live-down').textContent = last ? fmtRate(last.down) : '—';
+    $('#live-up').textContent = last ? fmtRate(last.up) : '—';
+    $('#live-peak').textContent = pts.length ? fmtRate(Math.max(...pts.map((p) => p.down))) : '—';
+    Charts.draw('ch-live', 'lines', {
+      ariaLabel: 'Live download and upload speed',
+      height: 220,
+      maxGap: 7,
+      points: pts.map((p) => ({ t: p.t, values: [p.down / 1e6, p.up / 1e6] })),
+      series: [{ cls: 's-down', area: true }, { cls: 's-up' }],
+      fmt: (v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + ' Mb/s',
+      xfmt: (t) => fmtClock(t, true),
+      tip: (p) => [fmtClock(p.t, true), `↓ ${fmtRate(p.values[0] * 1e6)}`, `↑ ${fmtRate(p.values[1] * 1e6)}`],
+      emptyText: 'Measuring… the graph starts after two readings.',
+    });
+  }
+
+  function startLive() {
+    clearInterval(liveTimer);
+    const tick = async () => {
+      if (tab !== 'usage' || document.hidden) return;
+      try {
+        const res = await api('/api/live');
+        livePoints = res.points.slice(-150);
+        drawLive();
+        const p = $('#live-pill');
+        if (p) { p.textContent = 'Live'; p.className = 'pill busy'; }
+      } catch (e) {
+        const p = $('#live-pill');
+        if (p) { p.textContent = e.kind === 'login' ? 'Logged out' : 'Paused'; p.className = 'pill off'; }
+      }
+    };
+    liveTimer = setInterval(tick, 2000);
+    tick();
   }
 
   // --- Internet ---
@@ -778,6 +1031,16 @@
     staleOpen = !staleOpen;
     if (data.devices) renderStale(data.devices.devices.filter((d) => d.stale));
   });
+  $('#usage').addEventListener('click', (e) => {
+    const r = e.target.closest('[data-range]');
+    const d = e.target.closest('[data-dir]');
+    const t = e.target.closest('[data-table]');
+    if (r) { usageRange = r.dataset.range; store.set('frRange', usageRange); }
+    else if (d) { usageDir = d.dataset.dir; store.set('frDir', usageDir); }
+    else if (t) usageTable = !usageTable;
+    else return;
+    if (data.usage) renderUsage(data.usage);
+  });
   $('#chips').addEventListener('click', (e) => {
     const b = e.target.closest('[data-filter]');
     if (!b) return;
@@ -888,6 +1151,7 @@
   buildPresets('down');
   buildPresets('up');
   syncExplainAll();
-  selectTab(store.get('frTab') || 'devices');
+  const fromHash = location.hash.slice(1);
+  selectTab(TABS.includes(fromHash) ? fromHash : store.get('frTab') || 'devices');
   if (tab !== 'devices') loadTab('devices', true);  // fetch caps + router header even if we opened elsewhere
 })();
