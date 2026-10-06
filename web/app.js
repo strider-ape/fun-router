@@ -8,22 +8,22 @@
   };
 
   const POLL_MS = 10000;
-  const IFACE_COLOR = { '5': 'c-blue', '2.4': 'c-mint', lan: 'c-pink', none: 'c-grey' };
-  const PRESETS = [0, 0.5, 1, 2, 5, 10];
-  const LOCK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="4" y="10" width="16" height="11"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
-  const PEN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M13 7l4 4"/></svg>';
-
   const TABS = ['devices', 'internet', 'wifi', 'security', 'tools'];
-  const data = {};            // per-tab last payload
+  const PRESETS = [0, 0.5, 1, 2, 5, 10];
+  const BAND_COLOR = { '5': 'c-blue', '2.4': 'c-green' };
+  const LOCK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>';
+
+  const data = {};            // last payload per tab
   let tab = 'devices';
-  let filter = store.get('panelFilter') || 'all';
+  let filter = store.get('frFilter') || 'all';
   let query = '';
   let lastOk = 0;
   let pin = store.get('panelPin') || '';
   let current = null;         // device a dialog is acting on
   let loginDismissed = false;
-  let explainAll = store.get('panelExplain') === '1';
+  let explainAll = store.get('frExplain') === '1';
   let caps = [];
+  const opened = new Set();   // explainers the user opened; kept open across the 10 s re-renders
 
   // --- API ---
   async function api(path, body) {
@@ -45,7 +45,6 @@
   // --- Formatting ---
   const kbps = (x) => x == null ? '—' : x >= 1000 ? (x / 1000).toFixed(x >= 10000 ? 0 : 1) + ' Mbps' : x + ' kbps';
   const limitText = (kb) => kb >= 1000 ? +(kb / 1000).toFixed(2) + ' Mbps' : kb + ' kbps';
-  const pct = (n, d) => d ? +(100 * n / d).toFixed(2) : 0;
   function duration(sec) {
     if (sec == null) return '—';
     const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
@@ -58,39 +57,64 @@
     while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
     return (i >= 2 ? n.toFixed(1) : Math.round(n)) + ' ' + u[i];
   }
+  const shortUptime = (u) => (u || '').replace(/\s*days?,\s*/, 'd ').replace(/(\d+):(\d+)$/, '$1h $2m');
   const bars = (rssi) => rssi == null ? 0 : rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
 
-  // --- Explainers ---
-  function explain(id, ctx) {
-    const e = window.EXPLAIN[id];
-    if (!e) return '';
-    const field = (f) => typeof f === 'function' ? f(ctx) : f;
-    const change = field(e.change), example = field(e.example);
-    const open = explainAll ? ' open' : '';
-    return `<details class="explain" data-explain="${id}"${open}>
-      <summary>How it works</summary>
-      <div class="explain-body">
-        <div><h4>What it is</h4><p>${field(e.what)}</p></div>
-        ${change ? `<div><h4>${esc(e.effect || 'When you change it')}</h4><p>${change}</p></div>` : ''}
-        ${example ? `<div><h4>Example</h4><p class="ex">${example}</p></div>` : ''}
-      </div>
-    </details>`;
+  // --- Building blocks ---
+  const pill = (text, cls = '') => `<span class="pill ${cls}">${esc(text)}</span>`;
+  const tag = (text, cls = '') => `<span class="tag ${cls}">${esc(text)}</span>`;
+  const panelId = (key) => 'why-' + String(key).replace(/[^a-z0-9]+/gi, '-');
+  const isOpen = (key) => explainAll || opened.has(key);
+
+  function why(key, label) {
+    return `<button class="why" type="button" data-why="${esc(key)}" aria-expanded="${isOpen(key)}" aria-controls="${panelId(key)}">${esc(label || 'How it works')}</button>`;
   }
-  const row = (dt, dd, explainId, ctx) =>
-    `<div class="kv-row"><dt>${esc(dt)}</dt><dd>${dd}</dd>${explainId ? explain(explainId, ctx) : ''}</div>`;
+  function whyPanel(id, ctx, key = id) {
+    const e = window.EXPLAIN && window.EXPLAIN[id];
+    if (!e) return '';
+    const f = (x) => (typeof x === 'function' ? x(ctx) : x);
+    const change = f(e.change), example = f(e.example);
+    return `<div class="explain-body" id="${panelId(key)}" data-why-panel="${esc(key)}"${isOpen(key) ? '' : ' hidden'}>
+      <div><h4>What it is</h4><p>${f(e.what)}</p></div>
+      ${change ? `<div><h4>${esc(e.effect || 'When you change it')}</h4><p>${change}</p></div>` : ''}
+      ${example ? `<div><h4>Example</h4><p class="ex">${example}</p></div>` : ''}
+    </div>`;
+  }
+  // A row of topic buttons with their panels underneath: [[explain id, label?, ctx?], ...]
+  function whyGroup(items) {
+    return `<div class="why-group">
+      <div class="why-row">${items.map(([id, label]) => why(id, label || window.EXPLAIN[id].title)).join('')}</div>
+      ${items.map(([id, , ctx]) => whyPanel(id, ctx)).join('')}
+    </div>`;
+  }
+  // Label on top, value in a field box, optional "How it works" on the label line.
+  function readout(label, value, explainId, ctx, key) {
+    const k = explainId ? key || explainId : null;
+    return `<div class="readout">
+      <div class="readout-top"><span class="label">${esc(label)}</span>${k ? why(k) : ''}</div>
+      <div class="value">${value}</div>
+      ${k ? whyPanel(explainId, ctx, k) : ''}
+    </div>`;
+  }
+  function card({ title, sub, status = '', color = 'c-yellow', body, foot = '', wide = false, cls = '', attrs = '' }) {
+    return `<section class="card${wide ? ' wide' : ''}${cls ? ' ' + cls : ''}" ${attrs}>
+      <header class="card-head ${color}"><div class="card-titles"><h3>${esc(title)}</h3>${sub ? `<p>${esc(sub)}</p>` : ''}</div>${status}</header>
+      <div class="card-body">${body}</div>
+      ${foot ? `<div class="card-foot">${foot}</div>` : ''}
+    </section>`;
+  }
 
   // --- Tabs ---
   function selectTab(name) {
     if (!TABS.includes(name)) name = 'devices';
-    clearInterval(diagTimer);  // stop any ping/traceroute poll when leaving its view
+    clearInterval(diagTimer);  // stop any ping/traceroute poll when leaving its view; renderTools resumes it
     tab = name;
-    store.set('panelTab', name);
+    store.set('frTab', name);
     for (const t of TABS) {
-      const btn = $('#tab-' + t), view = $('#view-' + t);
       const on = t === name;
-      btn.setAttribute('aria-selected', String(on));
-      btn.tabIndex = on ? 0 : -1;
-      view.hidden = !on;
+      $('#tab-' + t).setAttribute('aria-selected', String(on));
+      $('#tab-' + t).tabIndex = on ? 0 : -1;
+      $('#view-' + t).hidden = !on;
     }
     loadTab(name);
   }
@@ -144,61 +168,62 @@
 
   function renderEmpty(name, msg) {
     const host = { devices: '#grid', internet: '#internet', wifi: '#wifi', security: '#security', tools: '#tools' }[name];
-    $(host).innerHTML = `<div class="empty box">${esc(msg)}</div>`;
+    $(host).innerHTML = `<div class="empty">${esc(msg)}</div>`;
   }
 
-  // --- Router header ---
-  function renderRouter(r, wan) {
+  // --- Hero ---
+  function renderHero(r, wan) {
     if (!r) return;
-    $('#r-name').textContent = (r.model || 'Router');
-    $('#r-sub').textContent = (data.devices && data.devices.family ? data.devices.family.split('(')[0].trim() : 'Router') + ' · fw ' + (r.firmware || '?');
-    const up = wan ? wan.up : (r.wan && /^up/i.test(r.wan.status || ''));
-    const pill = $('#r-net');
-    pill.textContent = up ? 'Internet up' : 'Internet down';
-    pill.className = 'net-pill ' + (up ? 'up' : 'down');
-    $('#r-up').textContent = (r.uptime || '—').replace(/ days?,?/, 'd').replace(/ min/, 'm');
-    $('#r-cpu').textContent = r.cpu || '—';
-    $('#r-mem').textContent = r.memory || '—';
+    $('#path').textContent = '~/fun-router/' + (r.model || 'router');
+    const up = !!(wan || r.wan || {}).up;
+    const p = $('#net-pill');
+    p.textContent = up ? 'Internet up' : 'Internet down';
+    p.className = 'pill big ' + (up ? 'fill-green' : 'fill-red');
+    $('#vitals').innerHTML = [['FW', r.firmware], ['Up', shortUptime(r.uptime)], ['CPU', r.cpu], ['Mem', r.memory]]
+      .filter((x) => x[1]).map(([k, val]) => `<span class="vital"><b>${esc(k)}</b>${esc(val)}</span>`).join('');
   }
 
-  // --- Devices view ---
+  // --- Devices ---
   function ifaceOf(d) {
     const ifaces = (data.devices && data.devices.interfaces) || [];
     return ifaces.find((i) => i.id === d.iface) || null;
   }
-  function placeClass(d) {
-    const i = ifaceOf(d);
-    if (!i) return IFACE_COLOR.none;
-    return i.kind === 'wifi' ? IFACE_COLOR[i.band] || IFACE_COLOR.none : IFACE_COLOR.lan;
-  }
-  const placeLabel = (d) => { const i = ifaceOf(d); return i ? i.label : (d.online ? 'Located by IP only' : 'Not connected'); };
   const nameOf = (d) => d.nickname || d.hostname || 'Unknown device';
+  function placeLabel(d) {
+    const i = ifaceOf(d);
+    return i ? i.label : d.online ? 'Seen on the network' : 'Not connected';
+  }
+  function placeColor(d) {
+    if (d.blocked) return 'c-red';
+    const i = ifaceOf(d);
+    if (!d.online || !i) return 'c-grey';
+    return i.kind === 'wifi' ? BAND_COLOR[i.band] || 'c-grey' : 'c-pink';
+  }
 
   function deviceFilters() {
     const ifaces = (data.devices && data.devices.interfaces) || [];
+    const onBand = (band) => (d) => { const i = ifaceOf(d); return !!i && i.band === band; };
     const f = [['all', 'All', () => true]];
-    if (ifaces.some((i) => i.band === '5')) f.push(['5', '5 GHz', (d) => { const i = ifaceOf(d); return i && i.band === '5'; }]);
-    if (ifaces.some((i) => i.band === '2.4')) f.push(['24', '2.4 GHz', (d) => { const i = ifaceOf(d); return i && i.band === '2.4'; }]);
-    if (ifaces.some((i) => i.kind === 'lan')) f.push(['wired', 'Wired / AP', (d) => { const i = ifaceOf(d); return i && i.kind === 'lan'; }]);
+    if (ifaces.some((i) => i.band === '5')) f.push(['5', '5 GHz', onBand('5')]);
+    if (ifaces.some((i) => i.band === '2.4')) f.push(['24', '2.4 GHz', onBand('2.4')]);
+    if (ifaces.some((i) => i.kind === 'lan')) f.push(['wired', 'Cable / AP', (d) => { const i = ifaceOf(d); return !!i && i.kind === 'lan'; }]);
     f.push(['blocked', 'Blocked', (d) => d.blocked]);
-    f.push(['limited', 'Limited', (d) => d.limit.down || d.limit.up]);
+    f.push(['limited', 'Limited', (d) => !!(d.limit.down || d.limit.up)]);
     return f;
   }
 
   function renderDevices(state) {
-    renderRouter(state.router);
-    const devices = [...state.devices].sort((a, b) =>
-      (b.online - a.online) || nameOf(a).localeCompare(nameOf(b)));
+    renderHero(state.router);
+    const devices = [...state.devices].sort((a, b) => (b.online - a.online) || nameOf(a).localeCompare(nameOf(b)));
     const online = devices.filter((d) => d.online);
     const onWifi = online.filter((d) => { const i = ifaceOf(d); return i && i.kind === 'wifi'; });
-    const stats = [
+    $('#stats').innerHTML = [
       ['c-yellow', online.length, 'Online now'],
-      ['c-blue', onWifi.length, 'On Wi-Fi'],
-      ['c-pink', online.length - onWifi.length, 'Wired / upstairs'],
+      ['c-blue', onWifi.length, 'On router Wi-Fi'],
+      ['c-pink', online.length - onWifi.length, 'Cable or access point'],
       ['c-red', devices.filter((d) => d.blocked).length, 'Blocked'],
       ['c-orange', devices.filter((d) => d.limit.down || d.limit.up).length, 'Speed-limited'],
-    ];
-    $('#stats').innerHTML = stats.map(([c, n, l]) => `<div class="stat ${c}"><b>${n}</b><span>${l}</span></div>`).join('');
+    ].map(([c, n, l]) => `<div class="stat ${c}"><b>${n}</b><span>${l}</span></div>`).join('');
 
     const filters = deviceFilters();
     if (!filters.some((f) => f[0] === filter)) filter = 'all';
@@ -206,280 +231,367 @@
       `<button class="chip" type="button" data-filter="${key}" aria-pressed="${filter === key}">${esc(label)}<em>${devices.filter(fn).length}</em></button>`).join('');
 
     if (!$('#devices-explain').children.length) {
-      $('#devices-explain').innerHTML = '<div class="toolbar" style="margin-bottom:16px">' +
-        ['device.location', 'device.online', 'device.privateMac', 'device.block', 'device.limit']
-          .map((id) => explain(id)).join('') + '</div>';
+      $('#devices-explain').innerHTML = whyGroup([
+        ['device.location'], ['device.online'], ['device.signal', 'Signal and live speed'],
+        ['device.privateMac'], ['device.block'], ['device.limit'],
+      ]);
     }
 
     const test = (filters.find((f) => f[0] === filter) || filters[0])[2];
     const q = query.trim().toLowerCase();
     const shown = devices.filter(test).filter((d) => !q ||
       [nameOf(d), d.hostname, d.ip, d.mac].some((x) => x && x.toLowerCase().includes(q)));
-    $('#grid').innerHTML = shown.length ? shown.map(card).join('') : `<div class="empty box">No devices match.</div>`;
+    $('#grid').innerHTML = shown.length ? shown.map(deviceCard).join('') : '<div class="empty">No devices match.</div>';
   }
 
-  function card(d) {
+  function deviceCard(d) {
+    const i = ifaceOf(d);
     const limited = d.limit.down || d.limit.up;
-    const badges = [];
-    if (d.blocked) badges.push('<span class="badge c-red">Blocked</span>');
-    if (d.limit.down) badges.push(`<span class="badge c-orange">↓ max ${esc(limitText(d.limit.down))}</span>`);
-    if (d.limit.up) badges.push(`<span class="badge c-orange">↑ max ${esc(limitText(d.limit.up))}</span>`);
-    if (d.privateMac) badges.push('<span class="badge plain" title="Randomised MAC. If it changes, blocks stop matching.">Private MAC</span>');
-    if (d.wifi && d.wifi.uptime != null) badges.push(`<span class="badge plain">On for ${esc(duration(d.wifi.uptime))}</span>`);
+    const status = d.blocked ? pill('Blocked', 'alert') : d.online ? pill('Online', 'on') : pill('Offline', 'off');
+    const tags = [];
+    if (d.blocked) tags.push(tag('Blocked', 'fill-red'));
+    if (d.limit.down) tags.push(tag('↓ max ' + limitText(d.limit.down), 'fill-orange'));
+    if (d.limit.up) tags.push(tag('↑ max ' + limitText(d.limit.up), 'fill-orange'));
+    if (d.privateMac) tags.push(tag('Private MAC', 'plain'));
+    if (d.wifi && d.wifi.uptime != null) tags.push(tag('On for ' + duration(d.wifi.uptime), 'plain'));
 
-    let live;
+    let live = '';
     if (d.wifi) {
       const n = bars(d.wifi.rssi);
       live = `<div class="live">
-        <span class="meter" title="Download right now">↓ ${esc(kbps(d.wifi.downKbps))}</span>
-        <span class="meter" title="Upload right now">↑ ${esc(kbps(d.wifi.upKbps))}</span>
-        <span class="signal" title="Signal ${esc(d.wifi.rssi)} dBm" aria-label="Signal ${n} of 4">${[1, 2, 3, 4].map((i) => `<i class="${i <= n ? 'on' : ''}"></i>`).join('')}</span>
-        <span class="rssi">${esc(d.wifi.rssi)} dBm</span>
+        <span class="speed"><small>Down now</small><b>↓ ${esc(kbps(d.wifi.downKbps))}</b></span>
+        <span class="speed"><small>Up now</small><b>↑ ${esc(kbps(d.wifi.upKbps))}</b></span>
+        <span class="sig" title="Signal ${esc(d.wifi.rssi)} dBm, link ${esc(d.wifi.linkMbps)} Mb/s">
+          <span class="bars" aria-label="Signal ${n} of 4">${[1, 2, 3, 4].map((x) => `<i class="${x <= n ? 'on' : ''}"></i>`).join('')}</span>
+          <span class="dbm">${esc(d.wifi.rssi)} dBm</span>
+        </span>
       </div>`;
-    } else if (d.online && ifaceOf(d) && ifaceOf(d).kind === 'lan') {
-      live = '<p class="live-note">Through a cable or an access point on this port. Live per-device speed only shows for the router\'s own Wi-Fi.</p>';
-    } else {
-      live = d.online ? '' : '<p class="live-note">Not seen recently. It still holds an address lease.</p>';
+    } else if (d.online && i && i.kind === 'lan') {
+      live = '<p class="hint">Connected through a cable or an access point on this port. Live per-device speed only shows for the router\'s own Wi-Fi.</p>';
+    } else if (!d.online) {
+      live = '<p class="hint">Not seen recently. It still holds an address lease.</p>';
     }
 
     const actions = d.protected
-      ? `<p class="protected">${LOCK_ICON}<span>${esc(d.protected)}</span></p>`
-      : `${caps.includes('block') ? `<button class="btn ${d.blocked ? 'btn-go' : 'btn-stop'}" type="button" data-act="${d.blocked ? 'unblock' : 'block'}">${d.blocked ? 'Unblock' : 'Block'}</button>` : ''}
-         ${caps.includes('limit') ? `<button class="btn" type="button" data-act="limit" ${d.ip ? '' : 'disabled'}>${limited ? 'Edit limit' : 'Limit speed'}</button>` : ''}`;
+      ? `<div class="protected">${LOCK_ICON}<span>${esc(d.protected)}</span></div>`
+      : [
+        caps.includes('block') ? `<button class="btn ${d.blocked ? 'go' : 'stop'}" type="button" data-act="${d.blocked ? 'unblock' : 'block'}">${d.blocked ? 'Unblock' : 'Block'}</button>` : '',
+        caps.includes('limit') ? `<button class="btn" type="button" data-act="limit" ${d.ip ? '' : 'disabled'}>${limited ? 'Edit limit' : 'Limit speed'}</button>` : '',
+      ].join('');
 
-    return `<article class="card ${d.blocked ? 'is-blocked' : ''} ${d.online ? '' : 'is-offline'}" data-mac="${esc(d.mac)}">
-      <div class="card-head ${placeClass(d)}"><span>${esc(placeLabel(d))}</span><span class="state-dot ${d.online ? 'on' : ''}">${d.online ? 'Online' : 'Offline'}</span></div>
+    return `<article class="card dev" data-mac="${esc(d.mac)}">
+      <header class="card-head ${placeColor(d)}">
+        <div class="card-titles"><h3>${esc(nameOf(d))}</h3><p>${esc(placeLabel(d))}</p></div>
+        ${status}
+      </header>
       <div class="card-body">
-        <div class="name-row"><h3>${esc(nameOf(d))}</h3><button class="icon-btn" type="button" data-act="rename" aria-label="Rename ${esc(nameOf(d))}">${PEN_ICON}</button></div>
-        ${d.nickname && d.hostname ? `<p class="sub">${esc(d.hostname)}</p>` : ''}
-        <dl class="facts mono"><dt>IP</dt><dd>${esc(d.ip || '—')}</dd><dt>MAC</dt><dd>${esc(d.mac)}</dd></dl>
-        ${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}
+        <div class="dev-top">
+          <dl class="facts"><dt>IP</dt><dd>${esc(d.ip || '—')}</dd><dt>MAC</dt><dd>${esc(d.mac)}</dd></dl>
+          <button class="chip sm" type="button" data-act="rename" aria-label="Rename ${esc(nameOf(d))}">✎ Rename</button>
+        </div>
+        ${d.nickname && d.hostname ? `<p class="hint">The router calls it ${esc(d.hostname)}.</p>` : ''}
+        ${tags.length ? `<div class="tags">${tags.join('')}</div>` : ''}
         ${live}
       </div>
-      ${actions.trim() ? `<div class="card-actions">${actions}</div>` : ''}
+      ${actions ? `<div class="card-foot">${actions}</div>` : ''}
     </article>`;
   }
 
-  // --- Internet view ---
-  function panel(title, tag, bodyHtml, wide) {
-    return `<section class="panel${wide ? ' wide' : ''} box">
-      <div class="panel-head c-grey"><h3>${esc(title)}</h3>${tag ? `<span class="tag">${esc(tag)}</span>` : ''}</div>
-      <div class="panel-body">${bodyHtml}</div></section>`;
-  }
-  const flag = (text, cls) => `<span class="flag ${cls || 'c-grey'}">${esc(text)}</span>`;
-
+  // --- Internet ---
   function renderInternet(info) {
-    renderRouter(info.router, info.wan);
+    renderHero(info.router, info.wan);
     const wan = info.wan || {}, f = info.fibre, v6 = info.ipv6 || {};
-    const kindFlag = wan.addressKind === 'public' ? flag('public', 'c-mint')
-      : wan.addressKind === 'cgnat' ? flag('CGNAT', 'c-orange')
-      : wan.addressKind === 'private' ? flag('private', 'c-orange') : '';
+    const natted = wan.addressKind && wan.addressKind !== 'public';
+    const out = [];
 
-    const conn = `<dl class="kv">
-      ${row('Status', (wan.up ? 'Connected' : 'Down') + (wan.upSeconds ? ' · ' + duration(wan.upSeconds) : ''), 'wan.session', { vlan: wan.vlan, iface: wan.iface, up: duration(wan.upSeconds), gateway: wan.gateway })}
-      ${row('Type', esc((wan.protocol || '') + (wan.type ? ' · ' + wan.type : '')))}
-      ${row('Router uptime', duration(info.uptimeSeconds))}
-    </dl>`;
+    out.push(card({
+      title: 'Connection', color: 'c-yellow',
+      sub: [wan.protocol, wan.vlan ? 'VLAN ' + wan.vlan : ''].filter(Boolean).join(' · ') || 'WAN',
+      status: wan.up ? pill('Up · ' + duration(wan.upSeconds), 'on') : pill('Down', 'alert'),
+      body: `<div class="readouts">
+        ${readout('Status', esc(wan.up ? 'Connected' : 'Down') + (wan.upSeconds ? ` <span class="muted">for ${esc(duration(wan.upSeconds))}</span>` : ''),
+          'wan.session', { vlan: wan.vlan, iface: wan.iface, up: duration(wan.upSeconds), gateway: wan.gateway })}
+        ${readout('Connection type', esc([wan.protocol, wan.type].filter(Boolean).join(' · ') || '—'))}
+        ${readout('Router uptime', esc(duration(info.uptimeSeconds)))}
+      </div>`,
+    }));
 
-    const addr = `<dl class="kv">
-      ${row('IPv4 (WAN)', esc(wan.ip || '—') + ' ' + kindFlag, 'wan.address', { ip: wan.ip, kind: wan.addressKind })}
-      ${row('Gateway', esc(wan.gateway || '—'))}
-      ${row('IPv6 prefix', esc(v6.prefix || '—') + (v6.wan && v6.wan.ip ? ' ' + flag('up', 'c-mint') : ''), 'wan.ipv6', { prefix: v6.prefix, example: v6.lanAddress })}
-      ${row('DNS', esc((info.dns || []).slice(0, 2).join(', ') || '—'), 'wan.dns', { dns: (info.dns || []).join(', ') })}
-    </dl>`;
+    out.push(card({
+      title: 'Addresses', sub: 'IPv4, IPv6 and DNS', color: 'c-blue',
+      status: natted ? pill('Behind CGNAT', 'warn') : wan.addressKind === 'public' ? pill('Public IPv4', 'on') : '',
+      body: `<div class="readouts">
+        ${readout('WAN IPv4', `<span class="mono">${esc(wan.ip || '—')}</span>` + (natted ? tag(wan.addressKind === 'cgnat' ? 'CGNAT range' : 'Private range', 'fill-orange') : wan.ip ? tag('Public', 'fill-green') : ''),
+          'wan.address', { ip: wan.ip, kind: wan.addressKind })}
+        ${readout('ISP gateway', `<span class="mono">${esc(wan.gateway || '—')}</span>`)}
+        ${readout('IPv6 prefix', `<span class="mono">${esc(v6.prefix || '—')}</span>` + (v6.wan && v6.wan.ip ? tag('Up', 'fill-green') : ''),
+          'wan.ipv6', { prefix: v6.prefix, example: v6.lanAddress })}
+        ${readout('DNS servers', `<span class="mono">${esc((info.dns || []).slice(0, 2).join(', ') || '—')}</span>`, 'wan.dns', { dns: (info.dns || []).join(', ') })}
+      </div>`,
+    }));
 
-    let fibrePanel = '';
     if (f) {
       const lo = -30, hi = -8, span = hi - lo;
-      const posRx = Math.max(0, Math.min(100, (f.rxDbm - lo) / span * 100));
-      const good = f.rxDbm > -25, warn = f.rxDbm <= -25 && f.rxDbm > -27;
-      const gauge = `<div>
-        <div class="gauge" role="img" aria-label="Receive power ${esc(f.rxDbm)} dBm">
-          <span class="c-red" style="width:${(-27 - lo) / span * 100}%"></span>
-          <span class="c-orange" style="width:${2 / span * 100}%"></span>
-          <span class="c-mint" style="width:${(hi - -25) / span * 100}%"></span>
-          <i class="needle" style="left:${posRx}%"></i>
-        </div>
-        <div class="gauge-scale"><span>-30</span><span>-27</span><span>-25</span><span>-8 dBm</span></div>
-      </div>`;
-      fibrePanel = panel('Fibre (GPON)', f.onuState === 'O5' ? 'operating' : f.onuState, `
-        <p class="big-number">${esc(f.rxDbm != null ? f.rxDbm.toFixed(1) : '—')}<small>dBm received ${good ? '· healthy' : warn ? '· near limit' : '· low'}</small></p>
-        ${gauge}
-        <dl class="kv">
-          ${row('Receive power', esc(f.rxDbm != null ? f.rxDbm.toFixed(2) : '—') + ' dBm', 'fibre.rx', { rx: f.rxDbm })}
-          ${row('Transmit power', esc(f.txDbm != null ? f.txDbm.toFixed(2) : '—') + ' dBm', 'fibre.tx', { tx: f.txDbm, bias: f.biasMa })}
-          ${row('ONU state', esc(f.onuState || '—'), 'fibre.onu', { state: f.onuState })}
-          ${row('Temperature', esc(f.temperatureC != null ? f.temperatureC.toFixed(1) + ' °C' : '—'))}
-          ${row('FEC / HEC errors', esc(f.fecErrors) + ' / ' + esc(f.hecErrors), 'fibre.errors', { fec: f.fecErrors, hec: f.hecErrors })}
-        </dl>`);
+      const at = Math.max(0, Math.min(100, (f.rxDbm - lo) / span * 100));
+      const health = f.rxDbm == null ? '' : f.rxDbm > -25 ? 'Healthy' : f.rxDbm > -27 ? 'Near the limit' : 'Low';
+      out.push(card({
+        title: 'Fibre', sub: 'GPON optical levels', color: 'c-pink',
+        status: f.onuState === 'O5' ? pill('Operating', 'on') : pill(f.onuState || 'Unknown', 'alert'),
+        body: `<p class="big-number">${esc(f.rxDbm != null ? f.rxDbm.toFixed(1) : '—')}<small>dBm received · ${esc(health)}</small></p>
+          <div class="gauge-wrap" role="img" aria-label="Receive power ${esc(f.rxDbm)} dBm on a scale from -30 to -8">
+            <div class="gauge">
+              <span class="c-red" style="width:${(-27 - lo) / span * 100}%"></span>
+              <span class="c-orange" style="width:${2 / span * 100}%"></span>
+              <span class="c-green" style="width:${(hi + 25) / span * 100}%"></span>
+            </div>
+            ${f.rxDbm != null ? `<i class="needle" style="left:${at}%"></i>` : ''}
+          </div>
+          <div class="gauge-scale"><span>-30</span><span>-27</span><span>-25</span><span>-8 dBm</span></div>
+          <div class="readouts">
+            ${readout('Receive power', esc(f.rxDbm != null ? f.rxDbm.toFixed(2) + ' dBm' : '—'), 'fibre.rx', { rx: f.rxDbm })}
+            ${readout('Transmit power', esc(f.txDbm != null ? f.txDbm.toFixed(2) + ' dBm' : '—'), 'fibre.tx', { tx: f.txDbm, bias: f.biasMa })}
+            ${readout('ONU state', esc(f.onuState || '—'), 'fibre.onu', { state: f.onuState })}
+            ${readout('Optics temperature', esc(f.temperatureC != null ? f.temperatureC.toFixed(1) + ' °C' : '—'))}
+            ${readout('FEC / HEC errors', esc(f.fecErrors) + ' / ' + esc(f.hecErrors), 'fibre.errors', { fec: f.fecErrors, hec: f.hecErrors })}
+          </div>`,
+      }));
+
+      const days = info.uptimeSeconds ? info.uptimeSeconds / 86400 : 0;
+      const perDay = f.bytesIn && days ? bytes(f.bytesIn / days) : null;
+      out.push(card({
+        title: 'Data used', sub: 'Since the router last restarted', color: 'c-green',
+        status: perDay ? pill('~' + perDay + ' / day') : '',
+        body: `<p class="big-number">${esc(bytes(f.bytesIn))}<small>downloaded</small></p>
+          <div class="readouts">
+            ${readout('Downloaded', esc(bytes(f.bytesIn)), 'usage', { perDay, days: Math.round(days) })}
+            ${readout('Uploaded', esc(bytes(f.bytesOut)))}
+          </div>`,
+      }));
     }
 
-    const days = info.uptimeSeconds ? info.uptimeSeconds / 86400 : 0;
-    const perDay = f && f.bytesIn && days ? bytes(f.bytesIn / days) : null;
-    const usage = f ? panel('Data used', 'since reboot', `
-      <p class="big-number">${esc(bytes(f.bytesIn))}<small>downloaded</small></p>
-      <dl class="kv">
-        ${row('Downloaded', bytes(f.bytesIn), 'usage', { perDay, days: Math.round(days) })}
-        ${row('Uploaded', bytes(f.bytesOut))}
-      </dl>`) : '';
+    const ports = info.ports || [];
+    const slow = ports.find((p) => p.up && /100/.test(p.speed || ''));
+    const worst = (info.interfaces || []).filter((x) => x.txPackets)
+      .map((x) => ({ ...x, pct: +(100 * x.txErrors / x.txPackets).toFixed(3) }))
+      .sort((a, b) => b.pct - a.pct)[0];
+    out.push(card({
+      title: 'Ports & interfaces', sub: 'Link speeds and error counters', color: 'c-lilac',
+      status: pill(`${ports.filter((p) => p.up).length} of ${ports.length} ports up`),
+      body: `<div class="readouts">
+        ${ports.map((p) => readout(p.name, p.up
+          ? esc(p.speed + ' ' + (p.duplex || '')) + (/100/.test(p.speed || '') ? tag('Fast Ethernet', 'fill-orange') : tag('Gigabit', 'fill-green'))
+          : '<span class="muted">Not connected</span>')).join('')}
+        ${worst ? readout('Most Wi-Fi/LAN errors', esc(`${worst.name}: ${worst.txErrors} TX errors (${worst.pct}%)`), 'iface.errors', { worst }) : ''}
+      </div>
+      <div>${why('lan.ports', 'About port speeds')}${whyPanel('lan.ports', { slow: slow && slow.name })}</div>`,
+    }));
 
-    const slow = (info.ports || []).find((p) => p.up && /100/.test(p.speed || ''));
-    const ports = panel('LAN ports', null, `<dl class="kv">
-      ${(info.ports || []).map((p) => row(p.name, p.up ? esc(p.speed + ' ' + (p.duplex || '')) + (/100/.test(p.speed || '') ? ' ' + flag('100M', 'c-orange') : ' ' + flag('gigabit', 'c-mint')) : '<span class="dim">not connected</span>')).join('')}
-      <div class="kv-row"><dt>About</dt><dd></dd>${explain('lan.ports', { slow: slow && slow.name })}</div>
-    </dl>`);
-
-    $('#internet').innerHTML = panel('Connection', wan.up ? 'up' : 'down', conn) + panel('Addresses', null, addr) + (fibrePanel || '') + (usage || '') + ports;
+    $('#internet').innerHTML = out.join('');
   }
 
-  // --- Wi-Fi view ---
+  // --- Wi-Fi ---
   function channelMap(band, radios, neighbours) {
     const nets = [
-      ...radios.filter((r) => r.band === band && r.channel).map((r) => ({ ch: r.channel, w: r.widthMhz || 20, sig: 90, cls: 'mine', label: r.ssid })),
-      ...neighbours.filter((n) => (band === '2.4' ? n.channel <= 14 : n.channel > 14) && n.channel).map((n) => ({ ch: n.channel, w: n.widthMhz || 20, sig: n.signal || 10, cls: n.yours ? 'yours' : 'other', label: n.ssid })),
+      ...radios.filter((r) => r.band === band && r.channel).map((r) => ({ ch: r.channel, w: r.widthMhz || 20, sig: 95, cls: 'mine', label: r.ssid })),
+      ...neighbours.filter((n) => n.channel && (band === '2.4' ? n.channel <= 14 : n.channel > 14))
+        .map((n) => ({ ch: n.channel, w: n.widthMhz || 20, sig: n.signal || 10, cls: n.yours ? 'yours' : 'other', label: n.ssid })),
     ];
-    if (!nets.length) return '';
-    const chans = band === '2.4' ? [1, 6, 11] : [36, 44, 52, 60, 100, 108, 116, 124, 132, 140, 149, 157, 165];
-    const W = 620, H = 150, padL = 8, padB = 22, top = 10;
-    const lo = band === '2.4' ? 0 : 32, hi = band === '2.4' ? 15 : 169;
-    const x = (ch) => padL + (ch - lo) / (hi - lo) * (W - padL * 2);
-    const bw = (w) => w / 5 / (hi - lo) * (W - padL * 2);
-    const bars = nets.sort((a, b) => a.sig - b.sig).map((n) => {
-      const h = Math.max(6, (n.sig / 100) * (H - top - padB));
-      const w = Math.max(10, bw(n.w));
-      return `<rect class="net ${n.cls}" x="${(x(n.ch) - w / 2).toFixed(1)}" y="${(H - padB - h).toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="3"><title>${esc(n.label || '?')} · ch ${n.ch} · ${n.w}MHz${n.cls !== 'other' ? ' · yours' : ' · ' + n.sig + '%'}</title></rect>`;
+    if (!nets.length) return '<p class="hint">Nothing seen on this band in the last scan.</p>';
+    const ticks = band === '2.4' ? [1, 6, 11, 13] : [36, 52, 100, 116, 132, 149, 165];
+    const W = 640, H = 170, pad = 14, base = H - 26;
+    const lo = band === '2.4' ? -1 : 30, hi = band === '2.4' ? 15 : 171;
+    const x = (ch) => pad + (ch - lo) / (hi - lo) * (W - pad * 2);
+    const wpx = (mhz) => Math.max(12, (mhz / 5) / (hi - lo) * (W - pad * 2));
+    const rects = nets.sort((a, b) => a.sig - b.sig).map((n) => {
+      const h = Math.max(8, (n.sig / 100) * (base - 12));
+      const w = wpx(n.w);
+      return `<rect class="net ${n.cls}" x="${(x(n.ch) - w / 2).toFixed(1)}" y="${(base - h).toFixed(1)}" width="${w.toFixed(1)}" height="${h.toFixed(1)}" rx="5"><title>${esc(n.label || 'Hidden network')} · channel ${n.ch} · ${n.w} MHz${n.cls === 'other' ? ' · ' + n.sig + '% signal' : ' · yours'}</title></rect>`;
     }).join('');
-    const ticks = chans.map((ch) => `<text class="tick" x="${x(ch).toFixed(1)}" y="${H - 6}" text-anchor="middle">${ch}</text>`).join('');
+    const labels = ticks.map((ch) => `<text class="tick" x="${x(ch).toFixed(1)}" y="${H - 8}" text-anchor="middle">${ch}</text>`).join('');
     return `<svg class="chanmap" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(band)} GHz channel usage">
-      <line class="axis" x1="${padL}" y1="${H - padB}" x2="${W - padL}" y2="${H - padB}"/>${bars}${ticks}</svg>
-      <div class="legend"><span><i class="c-yellow"></i>This router</span><span><i class="c-pink"></i>Your other APs</span><span><i class="c-grey"></i>Neighbours</span></div>`;
+      <line class="axis" x1="${pad}" y1="${base}" x2="${W - pad}" y2="${base}"/>${rects}${labels}</svg>`;
   }
 
   function renderWifi(info) {
     const radios = info.radios || [], neighbours = info.neighbours || [];
-    const panels = radios.map((r) => {
-      const overlaps = neighbours.filter((n) => n.channel && Math.abs(n.channel - r.channel) < (r.band === '2.4' ? 5 : 4) && !n.yours).length;
-      const secFlag = /WPA3/.test(r.security) ? flag('WPA3', 'c-mint') : /WPA2/.test(r.security) ? flag('WPA2', 'c-mint') : flag(r.security, 'c-red');
-      const wpsFlag = r.wps.enabled ? flag(r.wps.defaultPin ? 'WPS · default PIN' : 'WPS on', 'c-red') : flag('WPS off', 'c-mint');
-      return panel(`${r.band} GHz · ${r.ssid || 'Wi-Fi'}`, r.enabled ? r.generation : 'disabled', `
-        <dl class="kv">
-          ${row('Channel', esc(r.channel) + (r.autoChannel ? ' ' + flag('auto', 'c-blue') : '') + ' · ' + esc(r.widthMhz) + ' MHz', 'wifi.channel', { band: r.band, channel: r.channel, width: r.widthMhz, overlaps })}
-          ${row('Width', esc(r.widthMhz) + ' MHz', 'wifi.width', { band: r.band, width: r.widthMhz, sideband: r.sideband })}
-          ${row('Standard', esc(r.standard || '—'), 'wifi.standard', { standard: r.standard, generation: r.generation })}
-          ${row('Transmit power', esc(r.powerPercent) + '%', 'wifi.power', { power: r.powerPercent })}
-          ${row('Security', esc(r.security) + ' ' + secFlag, 'wifi.security', { security: r.security, cipher: r.cipher })}
-          ${row('Mgmt frames (PMF)', esc(r.pmf), 'wifi.pmf', { pmf: r.pmf })}
-          ${row('WPS', r.wps.enabled ? 'On' + (r.wps.defaultPin ? ' · factory PIN' : '') + ' ' + wpsFlag : 'Off ' + wpsFlag, 'wifi.wps', { enabled: r.wps.enabled, pin: r.wps.pin, defaultPin: r.wps.defaultPin })}
-          ${row('Clients', esc(r.clients) + ' connected')}
-          ${row('Guest SSIDs', esc(r.guestNetworks.used) + ' of ' + esc(r.guestNetworks.slots) + ' used', 'wifi.guest', r.guestNetworks)}
-        </dl>`);
-    }).join('');
+    const out = radios.map((r) => {
+      const overlaps = neighbours.filter((n) => !n.yours && n.channel &&
+        Math.abs(n.channel - r.channel) < (r.band === '2.4' ? 5 : 4)).length;
+      const secTag = /WPA3/.test(r.security) ? tag('Strong', 'fill-green') : /WPA2/.test(r.security) ? tag('Good', 'fill-green') : tag('Weak', 'fill-red');
+      const wpsValue = r.wps.enabled
+        ? 'On' + (r.wps.defaultPin ? ' · factory PIN' : '') + tag(r.wps.defaultPin ? 'Turn off' : 'Consider off', 'fill-red')
+        : 'Off' + tag('Good', 'fill-green');
+      return card({
+        title: `${r.band} GHz Wi-Fi`, color: BAND_COLOR[r.band] || 'c-grey',
+        sub: [r.ssid ? `“${r.ssid}”` : '', r.generation].filter(Boolean).join(' · '),
+        status: !r.enabled ? pill('Off', 'off') : pill(`${r.clients} client${r.clients === 1 ? '' : 's'}`, r.clients ? 'on' : ''),
+        body: `<div class="readouts">
+          ${readout('Channel', esc(r.channel) + (r.autoChannel ? tag('Auto', 'fill-blue') : '') + (overlaps ? tag(`Overlaps ${overlaps}`, 'fill-orange') : ''),
+            'wifi.channel', { band: r.band, channel: r.channel, width: r.widthMhz, overlaps }, 'wifi.channel:' + r.id)}
+          ${readout('Channel width', esc(r.widthMhz + ' MHz'), 'wifi.width', { band: r.band, width: r.widthMhz, sideband: r.sideband }, 'wifi.width:' + r.id)}
+          ${readout('Standard', esc(r.standard || '—'), 'wifi.standard', { standard: r.standard, generation: r.generation }, 'wifi.standard:' + r.id)}
+          ${readout('Transmit power', esc(r.powerPercent + '%'), 'wifi.power', { power: r.powerPercent }, 'wifi.power:' + r.id)}
+          ${readout('Security', esc([r.security, r.cipher].filter(Boolean).join(' · ')) + secTag, 'wifi.security', { security: r.security, cipher: r.cipher }, 'wifi.security:' + r.id)}
+          ${readout('Protected management frames', esc(r.pmf || '—') + (r.pmf === 'off' ? tag('Off', 'fill-orange') : ''), 'wifi.pmf', { pmf: r.pmf }, 'wifi.pmf:' + r.id)}
+          ${readout('WPS', wpsValue, 'wifi.wps', { enabled: r.wps.enabled, pin: r.wps.pin, defaultPin: r.wps.defaultPin }, 'wifi.wps:' + r.id)}
+          ${readout('Guest networks', esc(`${r.guestNetworks.used} of ${r.guestNetworks.slots} in use`), 'wifi.guest', r.guestNetworks, 'wifi.guest:' + r.id)}
+        </div>`,
+      });
+    });
 
-    const busiest = (() => {
-      const byCh = {};
-      neighbours.forEach((n) => { if (n.channel) byCh[n.channel] = (byCh[n.channel] || 0) + 1; });
-      const top = Object.entries(byCh).sort((a, b) => b[1] - a[1])[0];
-      return top ? +top[0] : null;
-    })();
-    const maps = ['2.4', '5'].filter((b) => radios.some((r) => r.band === b)).map((b) =>
-      `<div><p class="lede">${b} GHz</p>${channelMap(b, radios, neighbours) || '<p class="live-note">No data.</p>'}</div>`).join('');
-    const nb = panel('Nearby networks & channels', neighbours.length + ' seen', `
-      ${maps}
-      <div class="kv-row"><dt>Reading it</dt><dd></dd>${explain('wifi.neighbours', { busiest })}</div>`, true);
-
-    $('#wifi').innerHTML = panels + nb;
+    const byCh = {};
+    neighbours.forEach((n) => { if (n.channel && !n.yours) byCh[n.channel] = (byCh[n.channel] || 0) + 1; });
+    const busiest = Object.entries(byCh).sort((a, b) => b[1] - a[1])[0];
+    const maps = ['2.4', '5'].filter((b) => radios.some((r) => r.band === b))
+      .map((b) => `<div class="band-map"><span class="label">${b} GHz band</span>${channelMap(b, radios, neighbours)}</div>`).join('');
+    out.push(card({
+      title: 'Nearby networks', sub: 'Your channels against the neighbours', color: 'c-pink', wide: true,
+      status: pill(`${neighbours.filter((n) => !n.yours).length} nearby`),
+      body: `${maps}
+        <div class="legend"><span><i class="c-yellow"></i>This router</span><span><i class="c-pink"></i>Your other access points</span><span><i class="c-grey"></i>Neighbours (height = signal)</span></div>
+        <div>${why('wifi.neighbours', 'How to read this')}${whyPanel('wifi.neighbours', { busiest: busiest ? +busiest[0] : null })}</div>`,
+    }));
+    $('#wifi').innerHTML = out.join('');
   }
 
-  // --- Security view ---
+  // --- Security ---
   function renderSecurity(info) {
     const checks = info.checks || [];
     const counts = { bad: 0, warn: 0, info: 0, good: 0 };
-    checks.forEach((c) => counts[c.level]++);
-    $('#sec-badge').hidden = false;
-    $('#sec-badge').textContent = counts.bad || counts.warn || '✓';
-    $('#sec-badge').className = 'tab-badge' + (counts.bad || counts.warn ? '' : ' ok');
+    checks.forEach((c) => { counts[c.level]++; });
+    const badge = $('#sec-count');
+    badge.hidden = false;
+    badge.textContent = counts.bad + counts.warn || '✓';
+    badge.className = 'count' + (counts.bad + counts.warn ? '' : ' ok');
 
-    const score = `<div class="score">
-      <div class="stat c-red"><b>${counts.bad}</b><span>Act now</span></div>
-      <div class="stat c-orange"><b>${counts.warn}</b><span>Look into</span></div>
-      <div class="stat c-blue"><b>${counts.info}</b><span>Good to know</span></div>
-      <div class="stat c-mint"><b>${counts.good}</b><span>All good</span></div>
-    </div>`;
-    const LEVEL = { bad: 'Act', warn: 'Check', info: 'Info', good: 'Good' };
-    const list = checks.map((c) => `<article class="check ${c.level}">
-      <div class="check-level">${LEVEL[c.level]}</div>
-      <div class="check-main"><h3>${esc(c.title)}</h3><p class="check-detail">${esc(c.detail)}</p></div>
-    </article>`).join('');
-    $('#security').innerHTML = `<div class="section-head"><div><h2>Security check-up</h2><p>Read-only. Nothing here is changed.</p></div></div>
-      <div style="margin-bottom:18px">${explain('sec.overview')}</div>${score}<div class="checks">${list}</div>`;
+    const LEVEL = { bad: ['Act now', 'fill-red'], warn: ['Look into', 'fill-orange'], info: ['Good to know', 'fill-blue'], good: ['All good', 'fill-green'] };
+    $('#security').innerHTML = `
+      <div class="stats">
+        <div class="stat c-red"><b>${counts.bad}</b><span>Act now</span></div>
+        <div class="stat c-orange"><b>${counts.warn}</b><span>Look into</span></div>
+        <div class="stat c-blue"><b>${counts.info}</b><span>Good to know</span></div>
+        <div class="stat c-green"><b>${counts.good}</b><span>All good</span></div>
+      </div>
+      ${whyGroup([['sec.overview']])}
+      <div class="checks">${checks.map((c) => `<article class="check">
+        ${pill(LEVEL[c.level][0], LEVEL[c.level][1])}
+        <h3>${esc(c.title)}</h3>
+        <p>${esc(c.detail)}</p>
+      </article>`).join('')}</div>`;
   }
 
-  // --- Tools view ---
+  // --- Tools ---
   let diagTimer = null;
+  let diagKind = null;
+  let diagDone = true;
+  const TOOL = {
+    ping: { title: 'Ping', verb: 'Ping', color: 'c-yellow', sub: 'From the router to any host', explain: 'tool.ping',
+      desc: 'Sends four ICMP echo requests from the router itself and times each reply. Your own Wi-Fi and computer are not in the path.' },
+    traceroute: { title: 'Traceroute', verb: 'Trace', color: 'c-pink', sub: 'Every hop on the way to a host', explain: 'tool.traceroute',
+      desc: 'Sends probes with a rising hop limit, so each router on the path reports back. Shows where the delay comes from.' },
+  };
+
   function renderTools() {
-    if ($('#tools').children.length) return;
-    const forms = [];
-    if (caps.includes('ping')) forms.push(toolPanel('ping', 'Ping', 'Send pings from the router to any host', 'tool.ping'));
-    if (caps.includes('traceroute')) forms.push(toolPanel('traceroute', 'Traceroute', 'Trace the path from the router to a host', 'tool.traceroute'));
-    $('#tools').innerHTML = forms.join('') || '<div class="empty box">This router has no diagnostics.</div>';
+    if (!$('#tools').children.length) {
+      const kinds = Object.keys(TOOL).filter((k) => caps.includes(k));
+      $('#tools').innerHTML = kinds.map(toolCard).join('') || '<div class="empty">This router has no diagnostics.</div>';
+    }
+    if (diagKind && !diagDone) pollDiag();  // a run started before leaving the tab is still going
   }
-  function toolPanel(kind, title, sub, explainId) {
-    return panel(title, 'from the router', `
-      <p class="lede">${esc(sub)}</p>
-      <form class="tool-form" data-kind="${kind}">
-        <input type="text" name="host" placeholder="1.1.1.1 or google.com" autocomplete="off" inputmode="url" aria-label="${esc(title)} host">
-        <button class="btn btn-main" type="submit">${esc(title)}</button>
-      </form>
-      ${explain(explainId)}
-      <div data-out="${kind}"></div>`, true);
+
+  function toolCard(kind) {
+    const t = TOOL[kind];
+    const gw = data.devices && data.devices.router && data.devices.router.wan && data.devices.router.wan.gateway;
+    const quick = [['1.1.1.1', '1.1.1.1'], ['8.8.8.8', '8.8.8.8'], ['google.com', 'google.com']];
+    if (gw) quick.push([gw, 'ISP gateway']);
+    return card({
+      title: t.title, sub: t.sub, color: t.color, attrs: `data-tool="${kind}"`,
+      status: `<span class="pill" data-tool-pill="${kind}">Idle</span>`,
+      body: `<p class="desc">${esc(t.desc)}</p>
+        <form class="tool-form" data-kind="${kind}">
+          <label class="label" for="host-${kind}">Host *</label>
+          <input class="input" id="host-${kind}" name="host" placeholder="1.1.1.1 or google.com" autocomplete="off" spellcheck="false" inputmode="url">
+          <div class="chip-row">${quick.map(([host, label]) => `<button class="chip sm" type="button" data-host="${esc(host)}">${esc(label)}</button>`).join('')}</div>
+          <div class="btn-row"><button class="btn go" type="submit">▶ ${esc(t.verb)}</button></div>
+        </form>
+        <div data-sum="${kind}"></div>
+        <div class="log-head"><span class="label">Live log</span><button class="btn sm" type="button" data-clear="${kind}">Clear view</button></div>
+        <pre class="log" data-out="${kind}">${placeholderLine(t.verb)}</pre>
+        <div>${why(t.explain)}${whyPanel(t.explain)}</div>`,
+    });
+  }
+  const placeholderLine = (verb) => `<span class="placeholder">Nothing has run yet. Press ▶ ${esc(verb)}.</span>`;
+
+  function setToolPill(kind, text, cls) {
+    const p = $(`[data-tool-pill="${kind}"]`);
+    if (p) { p.textContent = text; p.className = 'pill ' + cls; }
   }
 
   async function runDiag(kind, host) {
-    const out = $(`[data-out="${kind}"]`);
-    out.innerHTML = `<pre class="term">Starting ${esc(kind)} to ${esc(host)}…</pre>`;
+    const out = $(`[data-out="${kind}"]`), sum = $(`[data-sum="${kind}"]`);
+    setToolPill(kind, 'Starting', 'busy');
+    sum.innerHTML = '';
+    out.innerHTML = `<span class="placeholder">Asking the router to ${kind === 'ping' ? 'ping' : 'trace'} ${esc(host)}…</span>`;
     try {
       await api('/api/diag', { kind, host });
     } catch (e) {
-      if (e.kind === 'login') { banner('login'); openLogin(); } else out.innerHTML = `<pre class="term">${esc(e.message)}</pre>`;
+      setToolPill(kind, 'Failed', 'alert');
+      if (e.kind === 'login') { banner('login'); openLogin(); }
+      out.innerHTML = `<span class="err">${esc(e.message)}</span>`;
       return;
     }
+    diagKind = kind;
+    diagDone = false;
+    setToolPill(kind, 'Running', 'busy');
+    pollDiag();
+  }
+
+  function pollDiag() {
     clearInterval(diagTimer);
-    const poll = async () => {
+    const tick = async () => {
       let r;
       try { r = await api('/api/diag'); } catch (e) { clearInterval(diagTimer); return; }
-      if (r.kind !== kind) return;
-      out.innerHTML = kind === 'traceroute' ? traceroute(r) : pingOut(r);
-      if (r.done) clearInterval(diagTimer);
+      if (!r.kind) return;
+      renderDiag(r);
+      if (r.done) {
+        clearInterval(diagTimer);
+        diagDone = true;
+        setToolPill(r.kind, 'Done', 'on');
+      }
     };
-    diagTimer = setInterval(poll, 1000);
-    poll();
+    diagTimer = setInterval(tick, 1000);
+    tick();
   }
 
-  function pingOut(r) {
+  function renderDiag(r) {
+    const out = $(`[data-out="${r.kind}"]`), sum = $(`[data-sum="${r.kind}"]`);
+    if (!out) return;
     const lines = r.lines || [];
-    const stat = lines.find((l) => /packet loss/.test(l)) || '';
-    const loss = (stat.match(/(\d+)% packet loss/) || [])[1];
+    if (lines.length) out.textContent = lines.join('\n') + (r.done ? '' : '\n…');
+    sum.innerHTML = r.kind === 'ping' ? pingSummary(lines) : hopList(lines);
+  }
+
+  function pingSummary(lines) {
+    const loss = ((lines.find((l) => /packet loss/.test(l)) || '').match(/(\d+)% packet loss/) || [])[1];
     const rtt = (lines.find((l) => /min\/avg\/max/.test(l)) || '').match(/=\s*([\d.]+)\/([\d.]+)\/([\d.]+)/);
     const times = lines.map((l) => (l.match(/time=([\d.]+)/) || [])[1]).filter(Boolean).map(Number);
-    let summary = '';
-    if (rtt || loss != null) {
-      summary = `<dl class="ping-sum">
-        <div><dt>Min</dt><dd>${rtt ? rtt[1] : '—'}</dd></div>
-        <div><dt>Avg</dt><dd>${rtt ? rtt[2] : (times.length ? (times.reduce((a, b) => a + b, 0) / times.length).toFixed(1) : '—')}</dd></div>
-        <div><dt>Max</dt><dd>${rtt ? rtt[3] : '—'}</dd></div>
-        <div><dt>Loss</dt><dd>${loss != null ? loss + '%' : '—'}</dd></div>
-      </dl>`;
-    }
-    return summary + `<pre class="term">${esc(lines.join('\n') || 'Waiting for replies…')}${r.done ? '' : '\n…'}</pre>`;
+    if (!rtt && loss == null && !times.length) return '';
+    const avg = rtt ? rtt[2] : (times.reduce((a, b) => a + b, 0) / times.length).toFixed(1);
+    return `<dl class="ping-sum">
+      <div><dt>Min ms</dt><dd>${rtt ? esc(rtt[1]) : '—'}</dd></div>
+      <div><dt>Avg ms</dt><dd>${esc(avg)}</dd></div>
+      <div><dt>Max ms</dt><dd>${rtt ? esc(rtt[3]) : '—'}</dd></div>
+      <div><dt>Loss</dt><dd>${loss != null ? esc(loss) + '%' : '—'}</dd></div>
+    </dl>`;
   }
 
-  function traceroute(r) {
-    const lines = r.lines || [];
+  function hopList(lines) {
     const hops = lines.map((l) => l.match(/^\s*(\d+)\s+(.*?)\s+([\d.]+)\s*ms/)).filter(Boolean);
+    if (!hops.length) return '';
     const max = Math.max(1, ...hops.map((h) => +h[3]));
-    const list = hops.map((h) => `<div class="hop"><b>${esc(h[1])}</b><span class="host" title="${esc(h[2])}">${esc(h[2])}</span><span class="ms">${esc(h[3])} ms</span>
-      <span style="grid-column:2/4"><span class="bar" style="width:${Math.max(4, +h[3] / max * 100)}%"></span></span></div>`).join('');
-    return `<div class="hops">${list || '<p class="live-note">Tracing…</p>'}</div><pre class="term dim">${esc(lines.join('\n'))}${r.done ? '' : '\n…'}</pre>`;
+    return `<div class="hops">${hops.map((h) => `<div class="hop">
+      <b>${esc(h[1])}</b><span class="host" title="${esc(h[2])}">${esc(h[2])}</span><span class="ms">${esc(h[3])} ms</span>
+      <span class="bar-track"><span class="bar" style="width:${Math.max(4, +h[3] / max * 100)}%"></span></span>
+    </div>`).join('')}</div>`;
   }
 
   // --- Banner / toast ---
@@ -502,14 +614,13 @@
   }
   const anyDialogOpen = () => $$('dialog').some((d) => d.open);
 
-  // --- Actions on devices ---
-  async function run(button, path, body, after) {
-    const label = button.textContent;
+  // --- Device actions ---
+  async function run(button, path, body) {
+    const label = button.innerHTML;
     button.disabled = true;
     button.textContent = 'Working…';
     try {
       const res = await api(path, body);
-      if (after) after();
       if (res.message) toast(res.message);
       await loadTab('devices');
       return true;
@@ -520,23 +631,23 @@
       return false;
     } finally {
       button.disabled = false;
-      button.textContent = label;
+      button.innerHTML = label;
     }
   }
 
-  function findDevice(mac) { return (data.devices && data.devices.devices || []).find((d) => d.mac === mac); }
+  const findDevice = (mac) => ((data.devices && data.devices.devices) || []).find((d) => d.mac === mac);
 
   function openConfirm(d, act) {
     current = d;
     const block = act === 'block';
-    $('#confirm-head').className = 'dlg-head ' + (block ? 'c-red' : 'c-mint');
+    $('#confirm-head').className = 'dlg-head ' + (block ? 'c-red' : 'c-green');
     $('#confirm-title').textContent = (block ? 'Block ' : 'Unblock ') + nameOf(d) + '?';
     $('#confirm-text').textContent = block
-      ? 'It loses internet until you unblock it. It stays on the Wi-Fi and the local network.'
+      ? 'It loses internet access until you unblock it. It stays on the Wi-Fi and can still reach devices on your network.'
       : 'Internet access comes back right away.';
     const ok = $('#confirm-ok');
     ok.textContent = block ? 'Block it' : 'Unblock';
-    ok.className = 'btn ' + (block ? 'btn-stop' : 'btn-go');
+    ok.className = 'btn ' + (block ? 'stop' : 'go');
     ok.dataset.act = act;
     $('#dlg-confirm').showModal();
   }
@@ -551,7 +662,7 @@
   function buildPresets(dir) {
     const box = $(`fieldset[data-dir="${dir}"] .presets`);
     box.innerHTML = PRESETS.map((v) => `<button class="chip" type="button" data-rate="${v}">${v ? v + '' : 'Off'}</button>`).join('') +
-      `<input type="number" min="0.256" step="0.1" placeholder="Custom" aria-label="Custom ${dir} limit Mbps"><span class="unit">Mbps</span>`;
+      `<input class="input sm" type="number" min="0.256" step="0.1" placeholder="Custom" aria-label="Custom ${dir === 'down' ? 'download' : 'upload'} limit in Mbps"><span class="unit">Mbps</span>`;
     box.addEventListener('click', (e) => {
       const b = e.target.closest('[data-rate]');
       if (!b) return;
@@ -639,7 +750,7 @@
     const b = e.target.closest('[data-filter]');
     if (!b) return;
     filter = b.dataset.filter;
-    store.set('panelFilter', filter);
+    store.set('frFilter', filter);
     if (data.devices) renderDevices(data.devices);
   });
   $('#q').addEventListener('input', (e) => { query = e.target.value; if (data.devices) renderDevices(data.devices); });
@@ -651,7 +762,8 @@
     const vis = TABS.filter((t) => !$('#tab-' + t).hidden);
     const i = vis.indexOf(tab);
     const next = vis[(i + (e.key === 'ArrowRight' ? 1 : vis.length - 1)) % vis.length];
-    selectTab(next); $('#tab-' + next).focus();
+    selectTab(next);
+    $('#tab-' + next).focus();
   });
 
   $('#tools').addEventListener('submit', (e) => {
@@ -661,28 +773,54 @@
     const host = form.querySelector('input').value.trim();
     if (host) runDiag(form.dataset.kind, host);
   });
+  $('#tools').addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-host]');
+    if (chip) { const input = chip.closest('form').querySelector('input'); input.value = chip.dataset.host; input.focus(); return; }
+    const clear = e.target.closest('[data-clear]');
+    if (clear) {
+      const kind = clear.dataset.clear;
+      $(`[data-out="${kind}"]`).innerHTML = placeholderLine(TOOL[kind].verb);
+      $(`[data-sum="${kind}"]`).innerHTML = '';
+      if (diagDone || diagKind !== kind) setToolPill(kind, 'Idle', '');
+    }
+  });
 
-  // Explain-all toggle
+  // Explainers: one delegated handler for every "How it works" button on the page
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-why]');
+    if (!b) return;
+    const key = b.dataset.why;
+    const panel = $(`[data-why-panel="${CSS.escape(key)}"]`);
+    if (!panel) return;
+    const open = panel.hidden;
+    panel.hidden = !open;
+    b.setAttribute('aria-expanded', String(open));
+    if (open) opened.add(key); else opened.delete(key);
+  });
   function syncExplainAll() {
     $('#explain-all').setAttribute('aria-pressed', String(explainAll));
-    $('#explain-all').textContent = explainAll ? 'Hide help' : 'Explain all';
+    $('#explain-all').textContent = explainAll ? 'Hide explanations' : 'Explain all';
   }
   $('#explain-all').addEventListener('click', () => {
     explainAll = !explainAll;
-    store.set('panelExplain', explainAll ? '1' : null);
-    $$('details.explain').forEach((d) => { d.open = explainAll; });
+    store.set('frExplain', explainAll ? '1' : null);
+    if (!explainAll) opened.clear();
+    $$('[data-why-panel]').forEach((p) => { p.hidden = !explainAll; });
+    $$('[data-why]').forEach((b) => b.setAttribute('aria-expanded', String(explainAll)));
     syncExplainAll();
   });
 
-  // Theme
-  const savedTheme = store.get('panelTheme');
-  if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+  // Theme: light by default; dark only when chosen here
+  let theme = store.get('frTheme') === 'dark' ? 'dark' : 'light';
+  function applyTheme() {
+    if (theme === 'dark') document.documentElement.dataset.theme = 'dark';
+    else delete document.documentElement.dataset.theme;
+    $('#theme').textContent = theme === 'dark' ? 'Light mode' : 'Dark mode';
+  }
   $('#theme').addEventListener('click', () => {
-    const dark = document.documentElement.dataset.theme
-      ? document.documentElement.dataset.theme === 'dark'
-      : matchMedia('(prefers-color-scheme: dark)').matches;
-    document.documentElement.dataset.theme = dark ? 'light' : 'dark';
-    store.set('panelTheme', document.documentElement.dataset.theme);
+    theme = theme === 'dark' ? 'light' : 'dark';
+    store.set('frTheme', theme === 'dark' ? 'dark' : null);
+    applyTheme();
   });
 
   // --- Clock + polling ---
@@ -694,9 +832,10 @@
   setInterval(() => { if (!document.hidden && tab !== 'tools') loadTab(tab, true); }, POLL_MS);
   document.addEventListener('visibilitychange', () => { if (!document.hidden && tab !== 'tools') loadTab(tab, true); });
 
+  applyTheme();
   buildPresets('down');
   buildPresets('up');
   syncExplainAll();
-  selectTab(store.get('panelTab') || 'devices');
+  selectTab(store.get('frTab') || 'devices');
   if (tab !== 'devices') loadTab('devices', true);  // fetch caps + router header even if we opened elsewhere
 })();
